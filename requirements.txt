@@ -1,0 +1,11 @@
+arch==7.2.0
+numpy==2.2.4
+pandas==2.2.3
+plotly==6.0.1
+python-dotenv==1.0.1
+requests==2.32.3
+scipy==1.15.2
+statsmodels==0.14.4
+streamlit==1.44.1
+xlrd==2.0.1
+yfinance>=0.2.54,<1.0
