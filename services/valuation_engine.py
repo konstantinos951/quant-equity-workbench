@@ -20,12 +20,18 @@ _CAPEX_FIELDS = (
     "Capital Expenditure",
     "Capital Expenditures",
 )
+_DNA_FIELDS = ("Depreciation And Amortization",)
 _REVENUE_FIELDS = (
     "Total Revenue",
     "Operating Revenue",
 )
 _NET_INCOME_FIELDS = ("Net Income",)
+_OPERATING_INCOME_FIELDS = ("Operating Income",)
 _BOOK_VALUE_FIELDS = ("Stockholders Equity",)
+_CURRENT_ASSETS_FIELDS = ("Current Assets",)
+_CURRENT_LIABILITIES_FIELDS = ("Current Liabilities",)
+_CURRENT_DEBT_FIELDS = ("Current Debt",)
+_CASH_FIELDS = ("Cash And Cash Equivalents",)
 
 
 def _extract_series(frame: pd.DataFrame, labels: tuple[str, ...]) -> pd.Series:
@@ -134,7 +140,49 @@ def _estimate_growth_rate(dataset: StockDataset, fcf_series: pd.Series, revenue_
         weights.append(0.05)
 
     base_growth = _weighted_average(values, weights)
-    return _clamp(base_growth, -0.05, 0.18)
+    growth_evidence = max(
+        [
+            value
+            for value in (
+                fcf_cagr,
+                revenue_cagr,
+                dataset.revenue_growth,
+                dataset.earnings_growth,
+            )
+            if value is not None
+        ],
+        default=base_growth,
+    )
+    margin = dataset.profit_margin or 0.0
+
+    if growth_evidence >= 0.30 and margin >= 0.05:
+        upper_cap = 0.30
+    elif growth_evidence >= 0.20:
+        upper_cap = 0.26 if margin >= 0 else 0.24
+    elif growth_evidence >= 0.12:
+        upper_cap = 0.22
+    else:
+        upper_cap = 0.18
+
+    if margin >= 0.15:
+        upper_cap += 0.02
+
+    return _clamp(base_growth, -0.05, min(upper_cap, 0.32))
+
+
+def _effective_projection_years(dataset: StockDataset, base_years: int, growth_rate: float) -> int:
+    effective_years = int(base_years)
+    sector = dataset.sector.lower()
+    margin = dataset.profit_margin or 0.0
+
+    if growth_rate >= 0.25 and margin >= 0.12 and dataset.market_cap >= 50_000_000_000:
+        effective_years += 3
+    elif growth_rate >= 0.22 and margin >= 0.04 and dataset.market_cap >= 5_000_000_000:
+        effective_years += 2
+    elif growth_rate >= 0.14 and sector in {"technology", "communication services"}:
+        effective_years += 1
+
+    return max(base_years, min(effective_years, 12))
 
 
 def _normalize_starting_fcf(fcf_series: pd.Series) -> tuple[float, str]:
@@ -156,7 +204,8 @@ def _normalize_starting_fcf(fcf_series: pd.Series) -> tuple[float, str]:
 
 
 def _estimate_discount_rate(dataset: StockDataset, config: ValuationConfig) -> dict[str, float]:
-    cost_of_equity = dataset.risk_free_rate + max(dataset.beta, 0.6) * config.equity_risk_premium
+    adjusted_beta = 0.65 * dataset.beta + 0.35 * 1.0
+    cost_of_equity = dataset.risk_free_rate + max(adjusted_beta, 0.7) * config.equity_risk_premium
     cost_of_debt = max(dataset.risk_free_rate + config.debt_spread, 0.035)
 
     equity_value = max(dataset.market_cap, dataset.current_price * max(dataset.shares_outstanding, 1.0))
@@ -173,6 +222,7 @@ def _estimate_discount_rate(dataset: StockDataset, config: ValuationConfig) -> d
 
     return {
         "risk_free_rate": dataset.risk_free_rate,
+        "beta_used": float(adjusted_beta),
         "cost_of_equity": _clamp(cost_of_equity, 0.06, 0.22),
         "cost_of_debt": _clamp(cost_of_debt, 0.03, 0.14),
         "wacc": _clamp(wacc, 0.06, 0.18),
@@ -211,17 +261,36 @@ def _discounted_cash_flow(
 
 
 def _valuation_verdict(
-    median_intrinsic: float,
+    percentiles: dict[str, float],
     current_price: float,
     probability_undervalued: float,
 ) -> tuple[str, str]:
-    gap = (median_intrinsic - current_price) / current_price
+    median_intrinsic = percentiles["p50"]
+    p35 = percentiles.get("p35", percentiles.get("p25", median_intrinsic))
+    p65 = percentiles.get("p65", percentiles.get("p75", median_intrinsic))
+    p05 = percentiles.get("p05", p35)
+    p95 = percentiles.get("p95", p65)
+    spread_ratio = (p95 - p05) / max(abs(median_intrinsic), 1e-6)
 
-    if gap >= 0.15 and probability_undervalued >= 0.65:
-        return "Undervalued", "Η κατανομή του valuation δείχνει αρκετά υψηλή πιθανότητα η αγορά να τιμολογεί κάτω από την εύλογη αξία."
-    if gap <= -0.15 and probability_undervalued <= 0.35:
-        return "Overvalued", "Η κατανομή του valuation δείχνει ότι η τρέχουσα τιμή ενσωματώνει ήδη αρκετά αισιόδοξες προσδοκίες."
-    return "Fairly Priced", "Η τρέχουσα τιμή φαίνεται κοντά στη μέση ζώνη της εκτιμώμενης εύλογης αξίας."
+    if current_price < p35 and probability_undervalued >= 0.65:
+        return (
+            "Undervalued",
+            "Η τρέχουσα τιμή κάθεται κάτω από τη χαμηλότερη ζώνη του fair-value range και η κατανομή δείχνει ουσιαστική πιθανότητα undervaluation.",
+        )
+    if current_price > p65 and probability_undervalued <= 0.35:
+        return (
+            "Overvalued",
+            "Η τρέχουσα τιμή βρίσκεται πάνω από την ανώτερη ζώνη του fair-value range και η αγορά φαίνεται να ενσωματώνει πιο αισιόδοξες παραδοχές από το base valuation.",
+        )
+    if spread_ratio >= 1.10:
+        return (
+            "Fair / Uncertain",
+            "Το fair-value range είναι πολύ φαρδύ σε σχέση με τη median εκτίμηση, άρα η σωστή στάση είναι περισσότερο ταπεινότητα παρά απόλυτο label.",
+        )
+    return (
+        "Fairly Priced",
+        "Η τρέχουσα τιμή φαίνεται να κάθεται μέσα στη βασική ζώνη του estimated fair-value range.",
+    )
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float | None:
@@ -243,7 +312,7 @@ def _scenario_intrinsic_value(
     projection_years: int,
 ) -> float:
     growth_path = np.linspace(growth_rate, terminal_growth, projection_years)
-    growth_path = np.clip(growth_path, -0.25, 0.30)
+    growth_path = np.clip(growth_path, -0.25, 0.40)
     scenario = _discounted_cash_flow(
         starting_fcf=starting_fcf,
         growth_path=growth_path,
@@ -253,6 +322,71 @@ def _scenario_intrinsic_value(
         shares_outstanding=shares_outstanding,
     )
     return float(scenario["intrinsic_value"])
+
+
+def _reverse_dcf_market_implied_growth(
+    starting_fcf: float,
+    discount_rate: float,
+    terminal_growth: float,
+    net_cash: float,
+    shares_outstanding: float,
+    current_price: float,
+    projection_years: int,
+) -> dict[str, Any]:
+    def intrinsic_for_growth(initial_growth: float) -> float:
+        return _scenario_intrinsic_value(
+            starting_fcf=starting_fcf,
+            growth_rate=initial_growth,
+            discount_rate=discount_rate,
+            terminal_growth=terminal_growth,
+            net_cash=net_cash,
+            shares_outstanding=shares_outstanding,
+            projection_years=projection_years,
+        )
+
+    lower_growth = -0.20
+    upper_growth = 1.50
+    lower_value = intrinsic_for_growth(lower_growth)
+    upper_value = intrinsic_for_growth(upper_growth)
+
+    upper_bound_hit = False
+    if current_price <= lower_value:
+        required_growth = lower_growth
+    elif current_price >= upper_value:
+        required_growth = upper_growth
+        upper_bound_hit = True
+    else:
+        low = lower_growth
+        high = upper_growth
+        for _ in range(80):
+            mid = (low + high) / 2
+            intrinsic = intrinsic_for_growth(mid)
+            if intrinsic < current_price:
+                low = mid
+            else:
+                high = mid
+        required_growth = (low + high) / 2
+
+    if upper_bound_hit or required_growth >= 0.45:
+        label = "Very demanding"
+        note = "Η αγορά τιμολογεί πολύ επιθετικό growth path σε σχέση με τα σημερινά reported fundamentals."
+    elif required_growth >= 0.25:
+        label = "Demanding"
+        note = "Η αγορά ζητά υψηλό πολυετές growth για να στηριχθεί η τρέχουσα τιμή."
+    elif required_growth >= 0.12:
+        label = "Plausible"
+        note = "Η τρέχουσα τιμή μπορεί να στηριχθεί, αλλά απαιτεί ακόμα ουσιαστικό growth execution."
+    else:
+        label = "Modest"
+        note = "Η αγορά δεν απαιτεί ακραίο growth path για να στηριχθεί η τρέχουσα τιμή."
+
+    return {
+        "required_initial_growth": float(required_growth),
+        "projection_years": int(projection_years),
+        "upper_bound_hit": upper_bound_hit,
+        "label": label,
+        "note": note,
+    }
 
 
 def _build_dcf_scenario_table(
@@ -275,7 +409,7 @@ def _build_dcf_scenario_table(
     for label, fcf_multiplier, growth, discount, terminal in scenario_specs:
         intrinsic = _scenario_intrinsic_value(
             starting_fcf=starting_fcf * fcf_multiplier,
-            growth_rate=_clamp(growth, -0.10, 0.24),
+            growth_rate=_clamp(growth, -0.10, 0.36),
             discount_rate=_clamp(discount, 0.055, 0.22),
             terminal_growth=_clamp(terminal, 0.005, 0.035),
             net_cash=net_cash,
@@ -314,7 +448,7 @@ def _build_dcf_sensitivity_matrix(
     for discount_shift in discount_shifts:
         adjusted_discount = _clamp(discount_rate + discount_shift, 0.055, 0.22)
         for growth_shift in growth_shifts:
-            adjusted_growth = _clamp(growth_rate + growth_shift, -0.10, 0.24)
+            adjusted_growth = _clamp(growth_rate + growth_shift, -0.10, 0.36)
             adjusted_terminal = _clamp(terminal_growth + growth_shift * 0.20, 0.005, 0.035)
             intrinsic = _scenario_intrinsic_value(
                 starting_fcf=starting_fcf,
@@ -383,6 +517,27 @@ def _normalize_starting_roe(roe_series: pd.Series) -> tuple[float, str]:
 
     note = "Το starting ROE προέκυψε από median των τελευταίων reported annual ROEs."
     return _clamp(normalized, -0.15, 0.30), note
+
+
+def _rim_suitability(dataset: StockDataset, starting_roe: float) -> tuple[bool, str | None]:
+    industry = dataset.industry.lower()
+    price_to_book = dataset.price_to_book or 0.0
+    asset_light_software = any(token in industry for token in ("software", "internet", "platform", "application"))
+
+    if asset_light_software and price_to_book >= 8:
+        return (
+            False,
+            "Το residual income model παραλείφθηκε γιατί το ticker είναι asset-light / software με πολύ υψηλό P/B, "
+            "οπότε το book value δεν είναι καλό valuation anchor.",
+        )
+
+    if starting_roe <= -0.05:
+        return (
+            False,
+            "Το residual income model παραλείφθηκε γιατί το starting ROE είναι πολύ αρνητικό και θα έβγαζε ασταθές fair value.",
+        )
+
+    return True, None
 
 
 def _residual_income_value(
@@ -535,6 +690,573 @@ def _base_ratios(dataset: StockDataset) -> dict[str, float | None]:
     }
 
 
+def _operating_margin_series(dataset: StockDataset) -> pd.Series:
+    revenue_series = _extract_series(dataset.annual_income_stmt, _REVENUE_FIELDS)
+    operating_income_series = _extract_series(dataset.annual_income_stmt, _OPERATING_INCOME_FIELDS)
+    if revenue_series.empty or operating_income_series.empty:
+        return pd.Series(dtype=float)
+
+    aligned = pd.concat(
+        [revenue_series.rename("revenue"), operating_income_series.rename("operating_income")],
+        axis=1,
+        join="inner",
+    ).sort_index()
+    if aligned.empty:
+        return pd.Series(dtype=float)
+
+    margin = aligned["operating_income"] / aligned["revenue"].replace(0, np.nan)
+    return margin.replace([np.inf, -np.inf], np.nan).dropna().clip(-0.25, 0.45)
+
+
+def _dna_series(dataset: StockDataset) -> pd.Series:
+    dna = _extract_series(dataset.annual_cashflow, _DNA_FIELDS)
+    if not dna.empty:
+        return dna.abs().astype(float)
+
+    ebitda_series = _extract_series(dataset.annual_income_stmt, ("EBITDA",))
+    operating_income_series = _extract_series(dataset.annual_income_stmt, _OPERATING_INCOME_FIELDS)
+    if ebitda_series.empty or operating_income_series.empty:
+        return pd.Series(dtype=float)
+
+    aligned = pd.concat(
+        [ebitda_series.rename("ebitda"), operating_income_series.rename("operating_income")],
+        axis=1,
+        join="inner",
+    ).sort_index()
+    if aligned.empty:
+        return pd.Series(dtype=float)
+
+    derived = (aligned["ebitda"] - aligned["operating_income"]).clip(lower=0.0)
+    return derived.astype(float)
+
+
+def _non_cash_working_capital_series(dataset: StockDataset) -> pd.Series:
+    current_assets = _extract_series(dataset.annual_balance_sheet, _CURRENT_ASSETS_FIELDS)
+    current_liabilities = _extract_series(dataset.annual_balance_sheet, _CURRENT_LIABILITIES_FIELDS)
+    if current_assets.empty or current_liabilities.empty:
+        return pd.Series(dtype=float)
+
+    cash_series = _extract_series(dataset.annual_balance_sheet, _CASH_FIELDS)
+    current_debt_series = _extract_series(dataset.annual_balance_sheet, _CURRENT_DEBT_FIELDS)
+
+    aligned = pd.concat(
+        [
+            current_assets.rename("current_assets"),
+            current_liabilities.rename("current_liabilities"),
+            cash_series.rename("cash"),
+            current_debt_series.rename("current_debt"),
+        ],
+        axis=1,
+        join="inner",
+    ).sort_index()
+    if aligned.empty:
+        aligned = pd.concat(
+            [
+                current_assets.rename("current_assets"),
+                current_liabilities.rename("current_liabilities"),
+            ],
+            axis=1,
+            join="inner",
+        ).sort_index()
+        if aligned.empty:
+            return pd.Series(dtype=float)
+        aligned["cash"] = 0.0
+        aligned["current_debt"] = 0.0
+    else:
+        aligned["cash"] = aligned["cash"].fillna(0.0)
+        aligned["current_debt"] = aligned["current_debt"].fillna(0.0)
+
+    non_cash_wc = (aligned["current_assets"] - aligned["cash"]) - (
+        aligned["current_liabilities"] - aligned["current_debt"]
+    )
+    return non_cash_wc.astype(float)
+
+
+def _historical_fcff_frame(dataset: StockDataset, tax_rate: float) -> pd.DataFrame:
+    revenue_series = _extract_series(dataset.annual_income_stmt, _REVENUE_FIELDS)
+    operating_income_series = _extract_series(dataset.annual_income_stmt, _OPERATING_INCOME_FIELDS)
+    if revenue_series.empty or operating_income_series.empty:
+        return pd.DataFrame()
+
+    aligned = pd.concat(
+        [
+            revenue_series.rename("revenue"),
+            operating_income_series.rename("operating_income"),
+            _dna_series(dataset).rename("dna"),
+            _extract_series(dataset.annual_cashflow, _CAPEX_FIELDS).abs().rename("capex"),
+            _non_cash_working_capital_series(dataset).rename("nwc"),
+        ],
+        axis=1,
+        join="outer",
+    ).sort_index()
+
+    aligned = aligned[aligned["revenue"].notna() & aligned["operating_income"].notna()].copy()
+    if aligned.empty:
+        return pd.DataFrame()
+
+    aligned["dna"] = aligned["dna"].fillna(0.0)
+    aligned["capex"] = aligned["capex"].fillna(0.0)
+    aligned["nwc"] = aligned["nwc"].ffill().bfill()
+    aligned["delta_nwc"] = aligned["nwc"].diff().fillna(0.0)
+    aligned["nopat"] = aligned["operating_income"] * (1 - tax_rate)
+    aligned["reinvestment"] = aligned["capex"] - aligned["dna"] + aligned["delta_nwc"]
+    aligned["fcff"] = aligned["nopat"] - aligned["reinvestment"]
+    aligned["operating_margin"] = (
+        aligned["operating_income"] / aligned["revenue"].replace(0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan)
+    aligned["sales_delta"] = aligned["revenue"].diff()
+    return aligned.dropna(subset=["revenue", "operating_income"]).copy()
+
+
+def _capex_to_sales(dataset: StockDataset) -> float | None:
+    revenue_series = _extract_series(dataset.annual_income_stmt, _REVENUE_FIELDS)
+    capex_series = _extract_series(dataset.annual_cashflow, _CAPEX_FIELDS).abs()
+    aligned = pd.concat([revenue_series.rename("revenue"), capex_series.rename("capex")], axis=1, join="inner")
+    if aligned.empty:
+        return None
+    ratio = aligned["capex"] / aligned["revenue"].replace(0, np.nan)
+    ratio = ratio.replace([np.inf, -np.inf], np.nan).dropna()
+    if ratio.empty:
+        return None
+    return float(ratio.tail(3).median())
+
+
+def _classify_company(dataset: StockDataset, tax_rate: float) -> dict[str, Any]:
+    revenue_series = _extract_series(dataset.annual_income_stmt, _REVENUE_FIELDS)
+    operating_margin_series = _operating_margin_series(dataset)
+    fcff_frame = _historical_fcff_frame(dataset, tax_rate)
+    latest_fcff = float(fcff_frame["fcff"].iloc[-1]) if not fcff_frame.empty else None
+    latest_net_income = float(
+        _extract_series(dataset.annual_income_stmt, _NET_INCOME_FIELDS).iloc[-1]
+    ) if not _extract_series(dataset.annual_income_stmt, _NET_INCOME_FIELDS).empty else None
+
+    sector_lower = dataset.sector.lower()
+    industry_lower = dataset.industry.lower()
+    cyclical_tokens = ("semiconductor", "steel", "shipping", "oil", "gas", "chemical", "mining", "airline", "auto")
+    financial_tokens = ("financial", "bank", "insurance", "capital markets", "asset management")
+    asset_light_tokens = ("software", "internet", "platform", "application", "infrastructure")
+
+    revenue_cagr = _series_cagr(revenue_series)
+    revenue_growth = dataset.revenue_growth if dataset.revenue_growth is not None else revenue_cagr
+    capex_to_sales = _capex_to_sales(dataset)
+
+    is_financial = any(token in sector_lower or token in industry_lower for token in financial_tokens)
+    is_reit = "reit" in industry_lower
+    cyclical = any(token in industry_lower for token in cyclical_tokens)
+    asset_light = bool(
+        any(token in industry_lower for token in asset_light_tokens)
+        and (capex_to_sales is None or capex_to_sales < 0.05)
+    )
+    high_growth = bool(revenue_growth is not None and revenue_growth > 0.18)
+    has_positive_fcf = latest_fcff is not None and latest_fcff > 0
+    has_positive_earnings = latest_net_income is not None and latest_net_income > 0
+    data_poor = len(revenue_series.dropna()) < 3 or len(operating_margin_series.dropna()) < 3
+    book_relevant = bool(is_financial or (dataset.price_to_book is not None and dataset.price_to_book < 4 and not asset_light))
+
+    reasons: list[str] = []
+    if is_financial:
+        reasons.append("Financial sector detected, άρα το equity/book-based valuation είναι πιο κατάλληλο.")
+    if is_reit:
+        reasons.append("REIT-like company detected, άρα το γενικό FCFF engine δεν είναι το ιδανικό πρώτο εργαλείο.")
+    if cyclical:
+        reasons.append("Cyclical industry detected, άρα χρειάζεται πιο normalized margin handling.")
+    if asset_light:
+        reasons.append("Asset-light profile detected, άρα το book value είναι πιο αδύναμο anchor.")
+    if high_growth:
+        reasons.append("High-growth regime detected.")
+    if data_poor:
+        reasons.append("Limited fundamental history detected.")
+
+    return {
+        "is_financial": is_financial,
+        "is_reit": is_reit,
+        "cyclical": cyclical,
+        "asset_light": asset_light,
+        "high_growth": high_growth,
+        "has_positive_fcf": has_positive_fcf,
+        "has_positive_earnings": has_positive_earnings,
+        "book_relevant": book_relevant,
+        "data_poor": data_poor,
+        "revenue_cagr": revenue_cagr,
+        "fcff_frame": fcff_frame,
+        "reasons": reasons,
+    }
+
+
+def _choose_valuation_framework(classification: dict[str, Any]) -> tuple[str, str]:
+    if classification["is_reit"]:
+        return "hard_to_value", "Το app δεν έχει ακόμα ειδικό REIT/AFFO engine, άρα το intrinsic valuation θα ήταν παραπλανητικό."
+    if classification["is_financial"]:
+        return "residual_income", "Η εταιρεία φαίνεται financial, άρα το residual-income rail είναι πιο κατάλληλο."
+    if classification["data_poor"] and not classification["high_growth"]:
+        return "hard_to_value", "Τα διαθέσιμα annual fundamentals είναι λίγα για robust intrinsic valuation."
+    if classification["cyclical"]:
+        return "normalized_fcff", "Η εταιρεία φαίνεται cyclical, άρα χρησιμοποιούμε normalized FCFF framework."
+    if classification["high_growth"] and (not classification["has_positive_fcf"] or classification["asset_light"]):
+        return "growth_fcff", "Η εταιρεία φαίνεται high-growth / asset-light, άρα χρησιμοποιούμε growth-scenario FCFF."
+    return "fcff", "Η εταιρεία φαίνεται non-financial με αρκετά usable fundamentals, άρα default rail είναι FCFF + WACC."
+
+
+def _sector_margin_anchor(dataset: StockDataset) -> float:
+    sector_lower = dataset.sector.lower()
+    industry_lower = dataset.industry.lower()
+    if "software" in industry_lower or "internet" in industry_lower or "platform" in industry_lower:
+        return 0.28
+    if "semiconductor" in industry_lower:
+        return 0.22
+    if "industrial" in sector_lower:
+        return 0.14
+    if "consumer staples" in sector_lower:
+        return 0.16
+    if "consumer discretionary" in sector_lower:
+        return 0.14
+    if "health" in sector_lower:
+        return 0.18
+    if "energy" in sector_lower or "material" in sector_lower:
+        return 0.16
+    if "technology" in sector_lower or "communication" in sector_lower:
+        return 0.22
+    return 0.15
+
+
+def _estimate_sales_to_capital(dataset: StockDataset, classification: dict[str, Any], fcff_frame: pd.DataFrame) -> float:
+    if not fcff_frame.empty:
+        valid = fcff_frame[(fcff_frame["sales_delta"] > 0) & (fcff_frame["reinvestment"] > 0)].copy()
+        if not valid.empty:
+            series = valid["sales_delta"] / valid["reinvestment"]
+            series = series.replace([np.inf, -np.inf], np.nan).dropna()
+            series = series[(series > 0.2) & (series < 8.0)]
+            if not series.empty:
+                historical_estimate = float(_clamp(float(series.tail(4).median()), 0.6, 5.0))
+                if classification["asset_light"] and classification["high_growth"]:
+                    return max(historical_estimate, 2.2)
+                if classification["asset_light"]:
+                    return max(historical_estimate, 1.8)
+                if classification["cyclical"]:
+                    return float(_clamp(historical_estimate, 0.8, 2.4))
+                return historical_estimate
+
+    if classification["asset_light"] and classification["high_growth"]:
+        return 2.6
+    if classification["asset_light"]:
+        return 2.0
+    if classification["cyclical"]:
+        return 1.2
+    if dataset.sector.lower().startswith("technology"):
+        return 1.8
+    return 1.5
+
+
+def _margin_profile(
+    dataset: StockDataset,
+    classification: dict[str, Any],
+    mode: str,
+) -> tuple[float, float, pd.Series]:
+    margin_series = _operating_margin_series(dataset)
+    latest_margin = float(margin_series.iloc[-1]) if not margin_series.empty else float(dataset.profit_margin or 0.08)
+    normalized_margin = float(margin_series.tail(5).median()) if not margin_series.empty else latest_margin
+    sector_anchor = _sector_margin_anchor(dataset)
+
+    if mode == "growth_fcff":
+        starting_margin = _clamp(latest_margin, -0.10, 0.32)
+        target_margin = _clamp(max(normalized_margin, sector_anchor, starting_margin + 0.03), 0.08, 0.36)
+    elif mode == "normalized_fcff":
+        starting_margin = _clamp(normalized_margin, -0.05, 0.28)
+        target_margin = _clamp(0.7 * normalized_margin + 0.3 * sector_anchor, 0.05, 0.26)
+    else:
+        starting_margin = _clamp(latest_margin, -0.08, 0.28)
+        target_margin = _clamp(max(starting_margin, 0.7 * normalized_margin + 0.3 * sector_anchor), 0.04, 0.28)
+
+    if classification["asset_light"] and classification["high_growth"]:
+        target_margin = _clamp(max(target_margin, 0.18), 0.06, 0.34)
+
+    return starting_margin, target_margin, margin_series
+
+
+def _base_revenue_growth(dataset: StockDataset, classification: dict[str, Any]) -> float:
+    revenue_series = _extract_series(dataset.annual_income_stmt, _REVENUE_FIELDS)
+    cagr = _series_cagr(revenue_series)
+    recent = (
+        revenue_series.replace(0, np.nan).pct_change().replace([np.inf, -np.inf], np.nan).dropna().tail(3).median()
+        if not revenue_series.empty
+        else np.nan
+    )
+    candidates = [value for value in (cagr, dataset.revenue_growth, None if pd.isna(recent) else float(recent)) if value is not None]
+    base = float(np.median(candidates)) if candidates else 0.05
+
+    if classification["high_growth"]:
+        return _clamp(max(base, 0.12), 0.04, 0.35)
+    if classification["cyclical"]:
+        return _clamp(min(base, 0.10), -0.03, 0.12)
+    return _clamp(base, -0.03, 0.18)
+
+
+def _fcff_intrinsic_value_from_drivers(
+    starting_revenue: float,
+    starting_margin: float,
+    target_margin: float,
+    revenue_growth: float,
+    discount_rate: float,
+    terminal_growth: float,
+    sales_to_capital: float,
+    net_cash: float,
+    shares_outstanding: float,
+    projection_years: int,
+    tax_rate: float,
+) -> dict[str, Any]:
+    fade = np.linspace(0.0, 1.0, projection_years)
+    growth_path = revenue_growth + (terminal_growth - revenue_growth) * fade
+    growth_path = np.clip(growth_path, -0.10, 0.40)
+    margin_path = starting_margin + (target_margin - starting_margin) * np.power(fade, 0.85)
+    margin_path = np.clip(margin_path, -0.15, 0.40)
+
+    revenues = []
+    fcff_values = []
+    previous_revenue = starting_revenue
+    for growth, margin in zip(growth_path, margin_path):
+        revenue = previous_revenue * (1 + growth)
+        delta_revenue = revenue - previous_revenue
+        reinvestment = delta_revenue / max(sales_to_capital, 0.35)
+        ebit = revenue * margin
+        fcff = ebit * (1 - tax_rate) - reinvestment
+        revenues.append(revenue)
+        fcff_values.append(fcff)
+        previous_revenue = revenue
+
+    revenues_array = np.asarray(revenues, dtype=float)
+    fcff_array = np.asarray(fcff_values, dtype=float)
+    years = np.arange(1, projection_years + 1)
+    discount_factors = (1 + discount_rate) ** years
+    pv_fcf = float(np.sum(fcff_array / discount_factors))
+
+    terminal_revenue = revenues_array[-1] * (1 + terminal_growth)
+    terminal_reinvestment = (terminal_revenue - revenues_array[-1]) / max(sales_to_capital, 0.35)
+    terminal_fcff = terminal_revenue * target_margin * (1 - tax_rate) - terminal_reinvestment
+    spread = max(discount_rate - terminal_growth, 0.005)
+    terminal_value = terminal_fcff / spread
+    pv_terminal = terminal_value / ((1 + discount_rate) ** projection_years)
+    enterprise_value = pv_fcf + pv_terminal
+    equity_value = enterprise_value + net_cash
+    intrinsic_value = equity_value / max(shares_outstanding, 1.0)
+
+    return {
+        "revenues": revenues_array,
+        "fcff_path": fcff_array,
+        "enterprise_value": enterprise_value,
+        "equity_value": equity_value,
+        "intrinsic_value": intrinsic_value,
+        "terminal_value": terminal_value,
+    }
+
+
+def _compute_fcff_report(
+    dataset: StockDataset,
+    config: ValuationConfig,
+    discount_rates: dict[str, float],
+    classification: dict[str, Any],
+    mode: str,
+) -> dict[str, Any]:
+    revenue_series = _extract_series(dataset.annual_income_stmt, _REVENUE_FIELDS)
+    if revenue_series.empty:
+        raise ValuationError("Δεν υπάρχουν αρκετά revenue στοιχεία για FCFF valuation.")
+
+    starting_revenue = float(revenue_series.iloc[-1])
+    if starting_revenue <= 0:
+        raise ValuationError("Το latest reported revenue δεν είναι usable για FCFF valuation.")
+
+    tax_rate = config.tax_rate
+    fcff_frame = classification["fcff_frame"]
+    starting_margin, target_margin, margin_series = _margin_profile(dataset, classification, mode)
+    revenue_growth = _base_revenue_growth(dataset, classification)
+    if mode == "growth_fcff":
+        revenue_growth = _clamp(max(revenue_growth, 0.10), 0.06, 0.35)
+    elif mode == "normalized_fcff":
+        revenue_growth = _clamp(min(revenue_growth, 0.10), -0.03, 0.12)
+
+    effective_projection_years = _effective_projection_years(dataset, config.projection_years, revenue_growth)
+    if mode == "growth_fcff":
+        effective_projection_years = min(max(effective_projection_years, config.projection_years + 1), 12)
+
+    terminal_growth = _clamp(min(0.0325, max(0.0125, dataset.risk_free_rate * 0.68)), 0.0125, 0.0325)
+    sales_to_capital = _estimate_sales_to_capital(dataset, classification, fcff_frame)
+    net_cash = dataset.cash_and_equivalents - dataset.total_debt
+
+    deterministic = _fcff_intrinsic_value_from_drivers(
+        starting_revenue=starting_revenue,
+        starting_margin=starting_margin,
+        target_margin=target_margin,
+        revenue_growth=revenue_growth,
+        discount_rate=discount_rates["wacc"],
+        terminal_growth=terminal_growth,
+        sales_to_capital=sales_to_capital,
+        net_cash=net_cash,
+        shares_outstanding=dataset.shares_outstanding,
+        projection_years=effective_projection_years,
+        tax_rate=tax_rate,
+    )
+
+    rng = np.random.default_rng(21 if mode == "fcff" else 29 if mode == "growth_fcff" else 33)
+    growth_low = _clamp(revenue_growth - (0.05 if mode != "growth_fcff" else 0.08), -0.05, 0.24)
+    growth_high = _clamp(revenue_growth + (0.05 if mode != "growth_fcff" else 0.10), 0.04, 0.42)
+    target_margin_low = _clamp(target_margin - 0.04, -0.05, 0.28)
+    target_margin_high = _clamp(target_margin + 0.05, 0.02, 0.38)
+    starting_margin_low = _clamp(starting_margin - 0.03, -0.15, 0.25)
+    starting_margin_high = _clamp(starting_margin + 0.03, -0.05, 0.30)
+    sales_to_capital_low = _clamp(sales_to_capital * 0.75, 0.5, 4.5)
+    sales_to_capital_high = _clamp(sales_to_capital * 1.25, 0.8, 6.0)
+    discount_low = _clamp(discount_rates["wacc"] - 0.018, 0.055, 0.18)
+    discount_high = _clamp(discount_rates["wacc"] + 0.022, 0.07, 0.23)
+    terminal_low = _clamp(terminal_growth - 0.007, 0.0075, 0.03)
+    terminal_high = _clamp(terminal_growth + 0.007, 0.012, 0.035)
+
+    simulated_growth = _pert_sample(rng, growth_low, revenue_growth, growth_high, config.simulations)
+    simulated_target_margin = _pert_sample(rng, target_margin_low, target_margin, target_margin_high, config.simulations)
+    simulated_starting_margin = _pert_sample(rng, starting_margin_low, starting_margin, starting_margin_high, config.simulations)
+    simulated_sales_to_capital = _pert_sample(rng, sales_to_capital_low, sales_to_capital, sales_to_capital_high, config.simulations)
+    simulated_discount = _pert_sample(rng, discount_low, discount_rates["wacc"], discount_high, config.simulations)
+    simulated_terminal = _pert_sample(rng, terminal_low, terminal_growth, terminal_high, config.simulations)
+    simulated_terminal = np.minimum(simulated_terminal, simulated_discount - 0.005)
+
+    growth_excess = simulated_growth - revenue_growth
+    simulated_sales_to_capital = np.clip(
+        simulated_sales_to_capital / (1.0 + np.maximum(growth_excess, 0.0) * 1.25),
+        0.45,
+        6.0,
+    )
+    simulated_target_margin = np.clip(
+        simulated_target_margin - np.maximum(growth_excess, 0.0) * 0.04,
+        -0.08,
+        0.40,
+    )
+
+    intrinsic_distribution = np.empty(config.simulations, dtype=float)
+    for index in range(config.simulations):
+        intrinsic_distribution[index] = _fcff_intrinsic_value_from_drivers(
+            starting_revenue=starting_revenue,
+            starting_margin=float(simulated_starting_margin[index]),
+            target_margin=float(simulated_target_margin[index]),
+            revenue_growth=float(simulated_growth[index]),
+            discount_rate=float(simulated_discount[index]),
+            terminal_growth=float(simulated_terminal[index]),
+            sales_to_capital=float(simulated_sales_to_capital[index]),
+            net_cash=net_cash,
+            shares_outstanding=dataset.shares_outstanding,
+            projection_years=effective_projection_years,
+            tax_rate=tax_rate,
+        )["intrinsic_value"]
+
+    percentiles = {
+        "p05": float(np.percentile(intrinsic_distribution, 5)),
+        "p25": float(np.percentile(intrinsic_distribution, 25)),
+        "p35": float(np.percentile(intrinsic_distribution, 35)),
+        "p50": float(np.percentile(intrinsic_distribution, 50)),
+        "p65": float(np.percentile(intrinsic_distribution, 65)),
+        "p75": float(np.percentile(intrinsic_distribution, 75)),
+        "p95": float(np.percentile(intrinsic_distribution, 95)),
+    }
+    probability_undervalued = float(np.mean(intrinsic_distribution > dataset.current_price))
+    verdict, verdict_reason = _valuation_verdict(percentiles, dataset.current_price, probability_undervalued)
+    market_implied = _reverse_dcf_market_implied_growth(
+        starting_fcf=max(float(deterministic["fcff_path"][0]), 1e-6),
+        discount_rate=discount_rates["wacc"],
+        terminal_growth=terminal_growth,
+        net_cash=net_cash,
+        shares_outstanding=dataset.shares_outstanding,
+        current_price=dataset.current_price,
+        projection_years=max(effective_projection_years, 7),
+    )
+
+    mode_name = {
+        "fcff": "Monte Carlo FCFF DCF",
+        "growth_fcff": "Monte Carlo Growth Scenario FCFF",
+        "normalized_fcff": "Monte Carlo Normalized FCFF",
+    }[mode]
+
+    return {
+        "method_family": mode,
+        "method_used": mode_name,
+        "current_price": dataset.current_price,
+        "deterministic_intrinsic_value": float(deterministic["intrinsic_value"]),
+        "intrinsic_value_distribution": intrinsic_distribution,
+        "percentiles": percentiles,
+        "margin_of_safety": percentiles["p50"] / dataset.current_price - 1,
+        "probability_undervalued": probability_undervalued,
+        "verdict": verdict,
+        "verdict_reason": verdict_reason,
+        "assumptions": {
+            "starting_revenue": starting_revenue,
+            "starting_margin": starting_margin,
+            "target_margin": target_margin,
+            "revenue_growth": revenue_growth,
+            "sales_to_capital": sales_to_capital,
+            "terminal_growth": terminal_growth,
+            "risk_free_rate": discount_rates["risk_free_rate"],
+            "beta_used": discount_rates["beta_used"],
+            "cost_of_equity": discount_rates["cost_of_equity"],
+            "cost_of_debt": discount_rates["cost_of_debt"],
+            "wacc": discount_rates["wacc"],
+            "net_cash": net_cash,
+            "projection_years": config.projection_years,
+            "effective_projection_years": effective_projection_years,
+        },
+        "ratios": _base_ratios(dataset),
+        "market_implied": market_implied,
+        "scenario_table": _build_dcf_scenario_table(
+            starting_fcf=max(float(deterministic["fcff_path"][0]), 1e-6),
+            growth_rate=revenue_growth,
+            discount_rate=discount_rates["wacc"],
+            terminal_growth=terminal_growth,
+            net_cash=net_cash,
+            shares_outstanding=dataset.shares_outstanding,
+            projection_years=effective_projection_years,
+            current_price=dataset.current_price,
+        ),
+        "scenario_title": "Bear / Base / Bull valuation scenarios",
+        "sensitivity_matrix": _build_dcf_sensitivity_matrix(
+            starting_fcf=max(float(deterministic["fcff_path"][0]), 1e-6),
+            growth_rate=revenue_growth,
+            discount_rate=discount_rates["wacc"],
+            terminal_growth=terminal_growth,
+            net_cash=net_cash,
+            shares_outstanding=dataset.shares_outstanding,
+            projection_years=effective_projection_years,
+        ),
+        "sensitivity_title": "Valuation sensitivity to growth and WACC",
+        "uncertainty": {
+            "intrinsic_range_90": percentiles["p95"] - percentiles["p05"],
+            "range_vs_median": (percentiles["p95"] - percentiles["p05"]) / max(percentiles["p50"], 1e-6),
+        },
+        "normalization_note": (
+            "Το FCFF valuation βασίστηκε σε revenue -> margin -> reinvestment forecasting με sales-to-capital discipline."
+            if mode != "normalized_fcff"
+            else "Το FCFF valuation χρησιμοποιεί πιο normalized margins λόγω cyclical profile."
+        ),
+        "fundamental_series": {
+            "Revenue": revenue_series,
+            "Observed FCFF": fcff_frame["fcff"] if not fcff_frame.empty else pd.Series(dtype=float),
+        },
+        "input_rows": [
+            ("Method", mode_name),
+            ("Starting revenue", starting_revenue),
+            ("Starting EBIT margin", starting_margin),
+            ("Target EBIT margin", target_margin),
+            ("Revenue growth", revenue_growth),
+            ("Sales to capital", sales_to_capital),
+            ("Terminal growth", terminal_growth),
+            ("Risk-free rate", discount_rates["risk_free_rate"]),
+            ("Beta used", discount_rates["beta_used"]),
+            ("Cost of equity", discount_rates["cost_of_equity"]),
+            ("Cost of debt", discount_rates["cost_of_debt"]),
+            ("WACC", discount_rates["wacc"]),
+            ("Net cash / debt", net_cash),
+            ("User-selected DCF years", config.projection_years),
+            ("Effective DCF years", effective_projection_years),
+            ("Market-implied stage-1 growth", market_implied["required_initial_growth"]),
+            ("90% intrinsic range", percentiles["p95"] - percentiles["p05"]),
+        ],
+    }
+
+
 def _compute_dcf_report(
     dataset: StockDataset,
     config: ValuationConfig,
@@ -544,10 +1266,11 @@ def _compute_dcf_report(
     fcf_series = _compute_fcf_series(dataset)
     starting_fcf, normalization_note = _normalize_starting_fcf(fcf_series)
     growth_rate = _estimate_growth_rate(dataset, fcf_series, revenue_series)
+    effective_projection_years = _effective_projection_years(dataset, config.projection_years, growth_rate)
     terminal_growth = _clamp(min(0.03, max(0.01, dataset.risk_free_rate * 0.65)), 0.01, 0.03)
     net_cash = dataset.cash_and_equivalents - dataset.total_debt
 
-    base_growth_path = np.linspace(growth_rate, terminal_growth, config.projection_years)
+    base_growth_path = np.linspace(growth_rate, terminal_growth, effective_projection_years)
     deterministic_dcf = _discounted_cash_flow(
         starting_fcf=starting_fcf,
         growth_path=base_growth_path,
@@ -558,8 +1281,8 @@ def _compute_dcf_report(
     )
 
     rng = np.random.default_rng(42)
-    growth_low = _clamp(growth_rate - 0.06, -0.10, 0.20)
-    growth_high = _clamp(growth_rate + 0.06, -0.02, 0.25)
+    growth_low = _clamp(growth_rate - 0.08, -0.10, 0.24)
+    growth_high = _clamp(max(growth_rate + 0.08, growth_rate + 0.02), 0.05, 0.40)
     discount_low = _clamp(discount_rates["wacc"] - 0.02, 0.055, 0.18)
     discount_high = _clamp(discount_rates["wacc"] + 0.025, 0.07, 0.22)
     terminal_low = _clamp(terminal_growth - 0.008, 0.005, 0.03)
@@ -597,28 +1320,30 @@ def _compute_dcf_report(
     )
     simulated_terminal = np.minimum(simulated_terminal, simulated_discount - 0.005)
 
-    fade = np.linspace(0.0, 1.0, config.projection_years)
+    fade = np.linspace(0.0, 1.0, effective_projection_years)
     growth_paths = simulated_growth[:, None] + (simulated_terminal - simulated_growth)[:, None] * fade
-    growth_paths = np.clip(growth_paths, -0.25, 0.30)
+    growth_paths = np.clip(growth_paths, -0.25, 0.45)
 
     fcf_paths = simulated_starting_fcf[:, None] * np.cumprod(1 + growth_paths, axis=1)
-    years = np.arange(1, config.projection_years + 1)
+    years = np.arange(1, effective_projection_years + 1)
     discount_factors = (1 + simulated_discount[:, None]) ** years
     pv_fcf = np.sum(fcf_paths / discount_factors, axis=1)
     terminal_fcf = fcf_paths[:, -1] * (1 + simulated_terminal)
     terminal_value = terminal_fcf / np.maximum(simulated_discount - simulated_terminal, 0.005)
-    pv_terminal = terminal_value / ((1 + simulated_discount) ** config.projection_years)
+    pv_terminal = terminal_value / ((1 + simulated_discount) ** effective_projection_years)
     intrinsic_distribution = (pv_fcf + pv_terminal + net_cash) / dataset.shares_outstanding
 
     percentiles = {
         "p05": float(np.percentile(intrinsic_distribution, 5)),
         "p25": float(np.percentile(intrinsic_distribution, 25)),
+        "p35": float(np.percentile(intrinsic_distribution, 35)),
         "p50": float(np.percentile(intrinsic_distribution, 50)),
+        "p65": float(np.percentile(intrinsic_distribution, 65)),
         "p75": float(np.percentile(intrinsic_distribution, 75)),
         "p95": float(np.percentile(intrinsic_distribution, 95)),
     }
     probability_undervalued = float(np.mean(intrinsic_distribution > dataset.current_price))
-    verdict, verdict_reason = _valuation_verdict(percentiles["p50"], dataset.current_price, probability_undervalued)
+    verdict, verdict_reason = _valuation_verdict(percentiles, dataset.current_price, probability_undervalued)
     scenario_table = _build_dcf_scenario_table(
         starting_fcf=starting_fcf,
         growth_rate=growth_rate,
@@ -626,7 +1351,7 @@ def _compute_dcf_report(
         terminal_growth=terminal_growth,
         net_cash=net_cash,
         shares_outstanding=dataset.shares_outstanding,
-        projection_years=config.projection_years,
+        projection_years=effective_projection_years,
         current_price=dataset.current_price,
     )
     sensitivity_matrix = _build_dcf_sensitivity_matrix(
@@ -636,9 +1361,18 @@ def _compute_dcf_report(
         terminal_growth=terminal_growth,
         net_cash=net_cash,
         shares_outstanding=dataset.shares_outstanding,
-        projection_years=config.projection_years,
+        projection_years=effective_projection_years,
     )
     uncertainty_band = percentiles["p95"] - percentiles["p05"]
+    market_implied = _reverse_dcf_market_implied_growth(
+        starting_fcf=starting_fcf,
+        discount_rate=discount_rates["wacc"],
+        terminal_growth=terminal_growth,
+        net_cash=net_cash,
+        shares_outstanding=dataset.shares_outstanding,
+        current_price=dataset.current_price,
+        projection_years=max(effective_projection_years, 7),
+    )
 
     return {
         "method_family": "dcf",
@@ -656,13 +1390,16 @@ def _compute_dcf_report(
             "growth_rate": growth_rate,
             "terminal_growth": terminal_growth,
             "risk_free_rate": discount_rates["risk_free_rate"],
+            "beta_used": discount_rates["beta_used"],
             "cost_of_equity": discount_rates["cost_of_equity"],
             "cost_of_debt": discount_rates["cost_of_debt"],
             "wacc": discount_rates["wacc"],
             "net_cash": net_cash,
             "projection_years": config.projection_years,
+            "effective_projection_years": effective_projection_years,
         },
         "ratios": _base_ratios(dataset),
+        "market_implied": market_implied,
         "scenario_table": scenario_table,
         "scenario_title": "Bear / Base / Bull valuation scenarios",
         "sensitivity_matrix": sensitivity_matrix,
@@ -682,10 +1419,14 @@ def _compute_dcf_report(
             ("Growth rate", growth_rate),
             ("Terminal growth", terminal_growth),
             ("Risk-free rate", discount_rates["risk_free_rate"]),
+            ("Beta used", discount_rates["beta_used"]),
             ("Cost of equity", discount_rates["cost_of_equity"]),
             ("Cost of debt", discount_rates["cost_of_debt"]),
             ("WACC", discount_rates["wacc"]),
             ("Net cash / debt", net_cash),
+            ("User-selected DCF years", config.projection_years),
+            ("Effective DCF years", effective_projection_years),
+            ("Market-implied stage-1 growth", market_implied["required_initial_growth"]),
             ("90% intrinsic range", uncertainty_band),
         ],
     }
@@ -708,6 +1449,9 @@ def _compute_residual_income_report(
         raise ValuationError("Το latest book value per share δεν είναι θετικό, άρα το residual income model δεν είναι ασφαλές.")
 
     starting_roe, normalization_note = _normalize_starting_roe(roe_series)
+    rim_suitable, rim_note = _rim_suitability(dataset, starting_roe)
+    if not rim_suitable:
+        raise ValuationError(rim_note or "Το residual income model δεν είναι κατάλληλο για αυτό το ticker.")
     retention_rate = _estimate_retention_rate(dataset)
     terminal_growth = _clamp(min(0.02, max(0.0, dataset.risk_free_rate * 0.40)), 0.0, 0.02)
     terminal_roe = _clamp(
@@ -778,12 +1522,14 @@ def _compute_residual_income_report(
     percentiles = {
         "p05": float(np.percentile(intrinsic_distribution, 5)),
         "p25": float(np.percentile(intrinsic_distribution, 25)),
+        "p35": float(np.percentile(intrinsic_distribution, 35)),
         "p50": float(np.percentile(intrinsic_distribution, 50)),
+        "p65": float(np.percentile(intrinsic_distribution, 65)),
         "p75": float(np.percentile(intrinsic_distribution, 75)),
         "p95": float(np.percentile(intrinsic_distribution, 95)),
     }
     probability_undervalued = float(np.mean(intrinsic_distribution > dataset.current_price))
-    verdict, verdict_reason = _valuation_verdict(percentiles["p50"], dataset.current_price, probability_undervalued)
+    verdict, verdict_reason = _valuation_verdict(percentiles, dataset.current_price, probability_undervalued)
     uncertainty_band = percentiles["p95"] - percentiles["p05"]
 
     return {
@@ -804,6 +1550,7 @@ def _compute_residual_income_report(
             "retention_rate": retention_rate,
             "terminal_growth": terminal_growth,
             "risk_free_rate": discount_rates["risk_free_rate"],
+            "beta_used": discount_rates["beta_used"],
             "cost_of_equity": discount_rates["cost_of_equity"],
             "projection_years": config.projection_years,
         },
@@ -847,6 +1594,7 @@ def _compute_residual_income_report(
             ("Retention rate", retention_rate),
             ("Terminal growth", terminal_growth),
             ("Risk-free rate", discount_rates["risk_free_rate"]),
+            ("Beta used", discount_rates["beta_used"]),
             ("Cost of equity", discount_rates["cost_of_equity"]),
             ("90% intrinsic range", uncertainty_band),
         ],
@@ -867,23 +1615,36 @@ def _valuation_confidence(
     dataset: StockDataset,
     primary: dict[str, Any],
     secondary: dict[str, Any] | None,
+    classification: dict[str, Any],
 ) -> dict[str, Any]:
-    score = 35
+    score = 58
     reasons: list[str] = []
+    method_family = primary["method_family"]
+    uncertainty_ratio = float(primary["uncertainty"]["range_vs_median"])
 
-    if primary["method_family"] == "dcf":
-        fcf_years = len(primary["fundamental_series"].get("Free Cash Flow", pd.Series(dtype=float)).dropna())
+    if method_family in {"fcff", "growth_fcff", "normalized_fcff", "dcf"}:
+        fcff_series = primary["fundamental_series"].get("Observed FCFF")
+        if fcff_series is None or not isinstance(fcff_series, pd.Series):
+            fcff_series = primary["fundamental_series"].get("Free Cash Flow", pd.Series(dtype=float))
+        fcf_years = len(fcff_series.dropna())
         if fcf_years >= 4:
-            score += 15
-            reasons.append("Υπάρχουν αρκετά annual FCF observations για το primary DCF.")
-        if fcf_years >= 3 and (primary["fundamental_series"]["Free Cash Flow"].tail(3) > 0).all():
-            score += 10
-            reasons.append("Τα τελευταία reported FCFs είναι θετικά, άρα το DCF anchor είναι πιο σταθερό.")
+            score += 12
+            reasons.append("Υπάρχουν αρκετά annual operating fundamentals για το primary FCFF rail.")
+        elif fcf_years <= 1:
+            score -= 12
+            reasons.append("Το FCFF anchor στηρίζεται σε πολύ περιορισμένο observed history.")
+
+        if classification["high_growth"]:
+            score -= 4
+            reasons.append("Η εταιρεία είναι high-growth, άρα μεγαλύτερο μέρος της αξίας κάθεται σε future execution assumptions.")
+        if classification["cyclical"]:
+            score -= 8
+            reasons.append("Το cyclical profile αυξάνει το model risk γύρω από margins και normalized earnings power.")
     else:
         roe_years = len(primary.get("roe_series", pd.Series(dtype=float)).dropna())
         if roe_years >= 3:
-            score += 15
-            reasons.append("Υπάρχουν αρκετά annual ROE observations για residual income anchor.")
+            score += 14
+            reasons.append("Υπάρχουν αρκετά annual ROE observations για residual-income anchor.")
         if primary["assumptions"]["starting_book_value"] > 0:
             score += 10
             reasons.append("Το book value per share είναι θετικό, κάτι που βοηθά το residual income model.")
@@ -891,23 +1652,120 @@ def _valuation_confidence(
     if dataset.raw_info.get("sec_fundamentals_available"):
         score += 10
         reasons.append("Υπάρχει SEC fundamentals coverage για το συγκεκριμένο ticker.")
+    else:
+        score -= 15
+        reasons.append("Λείπει πλήρες SEC fundamentals layer, άρα το intrinsic valuation πατά σε φτωχότερο anchor.")
+
+    if classification["data_poor"]:
+        score -= 18
+        reasons.append("Το available annual history είναι περιορισμένο, άρα η valuation αξιοπιστία πέφτει αισθητά.")
+
+    if dataset.raw_info.get("history_mode") == "proxy":
+        score -= 8
+        reasons.append("Το ticker έτρεξε με proxy history για το forecast context, κάτι που μειώνει τη συνολική robustness εικόνα.")
+
+    if uncertainty_ratio <= 0.55:
+        score += 6
+        reasons.append("Το intrinsic range είναι σχετικά συγκρατημένο σε σχέση με τη median valuation εκτίμηση.")
+    elif uncertainty_ratio >= 1.10:
+        score -= 12
+        reasons.append("Το intrinsic range είναι πολύ πλατύ, άρα η valuation έξοδος πρέπει να διαβαστεί σαν zone και όχι σαν σημειακή τιμή.")
 
     if secondary is not None:
-        score += 10
+        score += 8
         gap = abs(secondary["percentiles"]["p50"] / max(primary["percentiles"]["p50"], 1e-6) - 1)
         if gap <= 0.15:
-            score += 15
+            score += 12
             reasons.append("Το cross-check valuation model συμφωνεί σχετικά κοντά με το primary anchor.")
         elif gap <= 0.30:
-            score += 8
+            score += 5
             reasons.append("Το cross-check model είναι χρήσιμο αλλά δείχνει material dispersion έναντι του primary.")
         else:
+            score -= 6
             reasons.append("Το cross-check model διαφωνεί αρκετά, άρα το fair-value range θέλει μεγαλύτερη ταπεινότητα.")
 
     score = int(max(0, min(score, 95)))
     if score >= 80:
         label = "High"
-    elif score >= 60:
+    elif score >= 55:
+        label = "Medium"
+    else:
+        label = "Low"
+
+    return {
+        "score": score,
+        "label": label,
+        "reasons": reasons,
+    }
+
+
+def _data_quality_summary(dataset: StockDataset, classification: dict[str, Any]) -> dict[str, Any]:
+    score = 48
+    reasons: list[str] = []
+
+    revenue_years = len(_extract_series(dataset.annual_income_stmt, _REVENUE_FIELDS).dropna())
+    margin_years = len(_operating_margin_series(dataset).dropna())
+    direct_history = dataset.raw_info.get("history_mode") == "direct"
+    proxy_history = dataset.raw_info.get("history_mode") == "proxy"
+    minimal_history = dataset.raw_info.get("history_mode") == "minimal"
+
+    if dataset.raw_info.get("profile_available"):
+        score += 8
+        reasons.append("Υπάρχει usable company profile / reference layer.")
+    else:
+        score -= 8
+        reasons.append("Λείπει πλήρες company profile layer.")
+
+    if dataset.raw_info.get("sec_fundamentals_available"):
+        score += 15
+        reasons.append("Υπάρχει SEC annual fundamentals coverage.")
+    else:
+        score -= 15
+        reasons.append("Δεν υπάρχει πλήρες SEC annual fundamentals coverage.")
+
+    if direct_history:
+        score += 12
+        reasons.append("Η ανάλυση βασίζεται σε direct daily price history του ίδιου του ticker.")
+    elif proxy_history:
+        score -= 8
+        reasons.append("Το price history ήρθε μέσω proxy mode, άρα το αποτέλεσμα είναι πιο exploratory.")
+    elif minimal_history:
+        score -= 18
+        reasons.append("Δεν υπάρχει κανονικό direct/proxy history, άρα το dataset είναι αδύναμο για πλήρη ανάλυση.")
+
+    if len(dataset.price_history) >= 252:
+        score += 8
+        reasons.append("Υπάρχει τουλάχιστον ένα έτος usable daily history.")
+    else:
+        score -= 8
+        reasons.append("Το διαθέσιμο daily history είναι αρκετά περιορισμένο.")
+
+    if revenue_years >= 5 and margin_years >= 4:
+        score += 10
+        reasons.append("Υπάρχουν αρκετά χρόνια revenue / margin history για structural valuation work.")
+    elif revenue_years >= 3:
+        score += 4
+        reasons.append("Υπάρχει μέτρια θεμελιώδης ιστορία, αλλά όχι ιδανική.")
+    else:
+        score -= 10
+        reasons.append("Τα annual fundamentals είναι λίγα για robust long-form valuation.")
+
+    if len(dataset.context_price_history) >= 4:
+        score += 5
+        reasons.append("Υπάρχει αρκετό market-context coverage από ETFs / proxies.")
+
+    if classification["data_poor"]:
+        score -= 12
+        reasons.append("Το classifier τοποθετεί το ticker σε data-poor regime.")
+
+    if dataset.market_cap > 0 and dataset.market_cap < 1_000_000_000:
+        score -= 8
+        reasons.append("Το ticker είναι μικρότερης κεφαλαιοποίησης, κάτι που συνήθως αυξάνει data fragility και model noise.")
+
+    score = int(max(5, min(score, 95)))
+    if score >= 80:
+        label = "High"
+    elif score >= 55:
         label = "Medium"
     else:
         label = "Low"
@@ -926,34 +1784,74 @@ def build_valuation_report(dataset: StockDataset, config: ValuationConfig) -> di
         raise ValuationError("Δεν βρέθηκαν αρκετά στοιχεία για shares outstanding.")
 
     discount_rates = _estimate_discount_rate(dataset, config)
-    dcf_report: dict[str, Any] | None = None
+    classification = _classify_company(dataset, config.tax_rate)
+    framework, framework_reason = _choose_valuation_framework(classification)
+    fcff_report: dict[str, Any] | None = None
     rim_report: dict[str, Any] | None = None
     errors: list[str] = []
 
-    try:
-        dcf_report = _compute_dcf_report(dataset, config, discount_rates)
-    except ValuationError as exc:
-        errors.append(f"DCF: {exc}")
+    if framework == "hard_to_value":
+        raise ValuationError(framework_reason)
 
-    try:
-        rim_report = _compute_residual_income_report(dataset, config, discount_rates)
-    except ValuationError as exc:
-        errors.append(f"Residual income: {exc}")
+    if framework in {"fcff", "growth_fcff", "normalized_fcff"}:
+        try:
+            fcff_report = _compute_fcff_report(dataset, config, discount_rates, classification, framework)
+        except ValuationError as exc:
+            errors.append(f"FCFF: {exc}")
 
-    if dcf_report is None and rim_report is None:
-        raise ValuationError(" | ".join(errors))
+        if classification["book_relevant"] and classification["has_positive_earnings"] and not classification["asset_light"]:
+            try:
+                rim_report = _compute_residual_income_report(dataset, config, discount_rates)
+            except ValuationError as exc:
+                errors.append(f"Residual income: {exc}")
+    elif framework == "residual_income":
+        try:
+            rim_report = _compute_residual_income_report(dataset, config, discount_rates)
+        except ValuationError as exc:
+            errors.append(f"Residual income: {exc}")
+    else:
+        errors.append(f"Unsupported framework: {framework}")
 
-    primary = dcf_report or rim_report
-    secondary = rim_report if dcf_report is not None and rim_report is not None else None
+    if fcff_report is None and rim_report is None:
+        raise ValuationError(" | ".join(errors) if errors else framework_reason)
+
+    if framework == "residual_income":
+        primary = rim_report
+        secondary = None
+    else:
+        primary = fcff_report or rim_report
+        secondary = rim_report if fcff_report is not None and rim_report is not None else None
+
     if primary is None:
         raise ValuationError("Δεν βρέθηκε usable valuation output.")
 
+    classification_summary = {
+        "is_financial": classification["is_financial"],
+        "is_reit": classification["is_reit"],
+        "cyclical": classification["cyclical"],
+        "asset_light": classification["asset_light"],
+        "high_growth": classification["high_growth"],
+        "has_positive_fcf": classification["has_positive_fcf"],
+        "has_positive_earnings": classification["has_positive_earnings"],
+        "book_relevant": classification["book_relevant"],
+        "data_poor": classification["data_poor"],
+        "revenue_cagr": classification["revenue_cagr"],
+        "reasons": classification["reasons"],
+    }
+
+    primary["classification"] = classification_summary
+    primary["framework_selected"] = framework
+    primary["framework_reason"] = framework_reason
+    primary["data_quality"] = _data_quality_summary(dataset, classification)
     primary["cross_check"] = _cross_check_summary(primary, secondary) if secondary is not None else None
-    primary["confidence"] = _valuation_confidence(dataset, primary, secondary)
+    primary["confidence"] = _valuation_confidence(dataset, primary, secondary, classification)
     primary["secondary_method"] = secondary["method_used"] if secondary is not None else None
     primary["valuation_stack_note"] = (
-        "Primary valuation anchor: Monte Carlo FCF DCF. Cross-check: Residual Income."
-        if secondary is not None and primary["method_family"] == "dcf"
-        else "Primary valuation anchor: Monte Carlo Residual Income."
+        "Adaptive valuation stack: company classification -> framework selection -> probabilistic fair-value range. "
+        "Primary anchor είναι το FCFF rail, ενώ το residual-income model εμφανίζεται μόνο ως cross-check όταν το book value έχει νόημα."
+        if primary["method_family"] in {"fcff", "growth_fcff", "normalized_fcff"} and secondary is not None
+        else "Adaptive valuation stack: το primary anchor είναι FCFF + WACC με revenue, margin και reinvestment drivers."
+        if primary["method_family"] in {"fcff", "growth_fcff", "normalized_fcff"}
+        else "Adaptive valuation stack: το primary anchor είναι residual income, επειδή το equity/book framework ταιριάζει περισσότερο σε αυτό το profile."
     )
     return primary
