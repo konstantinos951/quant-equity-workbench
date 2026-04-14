@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+from services.decision_engine import build_long_term_report, build_short_term_report
 from services.data_service import (
     DataRetrievalError,
     estimate_analysis_budget,
@@ -29,7 +30,7 @@ load_dotenv()
 
 
 st.set_page_config(
-    page_title="Quant Equity Workbench",
+    page_title="Equity Research Desk",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -40,24 +41,25 @@ def inject_styles() -> None:
         """
         <style>
         :root {
-            --bg: #eef3f7;
-            --bg-soft: rgba(250, 253, 255, 0.90);
-            --ink: #12263a;
-            --muted: #536579;
-            --accent: #0f766e;
-            --accent-soft: rgba(15, 118, 110, 0.12);
-            --warm: #c26a12;
-            --danger: #b91c1c;
-            --info: #1d4ed8;
-            --line: rgba(18, 38, 58, 0.10);
-            --shadow: 0 24px 60px rgba(18, 38, 58, 0.12);
+            --navy: #081423;
+            --navy-soft: #10253b;
+            --paper: #f6f1e8;
+            --paper-strong: #fbf8f1;
+            --ink: #172437;
+            --muted: #5e6c7c;
+            --gold: #ae8450;
+            --gold-soft: rgba(174, 132, 80, 0.12);
+            --teal: #0e6665;
+            --teal-soft: rgba(14, 102, 101, 0.12);
+            --danger: #a53d32;
+            --info: #234d84;
+            --line: rgba(23, 36, 55, 0.12);
+            --line-strong: rgba(23, 36, 55, 0.18);
+            --shadow: 0 22px 48px rgba(7, 18, 33, 0.14);
         }
         .stApp {
             background:
-                radial-gradient(circle at top left, rgba(15, 118, 110, 0.16), transparent 24%),
-                radial-gradient(circle at 85% 8%, rgba(29, 78, 216, 0.12), transparent 22%),
-                radial-gradient(circle at 15% 90%, rgba(194, 106, 18, 0.10), transparent 20%),
-                linear-gradient(180deg, #edf4fa 0%, #dfe9f4 100%);
+                linear-gradient(180deg, #e8e0d3 0%, #ece5da 14%, #f3ede4 34%, #f6f1e8 100%);
         }
         section[data-testid="stMain"] {
             color: var(--ink);
@@ -80,80 +82,130 @@ def inject_styles() -> None:
         }
         div[data-testid="stSidebar"] {
             background:
-                radial-gradient(circle at top, rgba(49, 204, 191, 0.18), transparent 28%),
-                radial-gradient(circle at 85% 12%, rgba(59, 130, 246, 0.20), transparent 20%),
-                linear-gradient(180deg, #0f1c2f 0%, #14273b 100%);
+                linear-gradient(180deg, #07121f 0%, #0c1c2f 100%);
             border-right: 1px solid rgba(255, 255, 255, 0.08);
         }
         div[data-testid="stSidebar"] * {
-            color: #f4f8fb;
+            color: #eef3f8;
         }
         .hero-grid {
             display: grid;
             grid-template-columns: 1.5fr 1fr;
-            gap: 1.1rem;
-            margin-bottom: 1.2rem;
+            gap: 1rem;
+            margin-bottom: 1.15rem;
         }
         .panel {
-            padding: 1.35rem 1.45rem;
-            border-radius: 28px;
-            background:
-                linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 251, 255, 0.90));
+            padding: 1.4rem 1.45rem;
+            border-radius: 22px;
+            background: linear-gradient(180deg, rgba(251, 248, 241, 0.96), rgba(247, 242, 232, 0.94));
             border: 1px solid var(--line);
             box-shadow: var(--shadow);
-            backdrop-filter: blur(16px);
+        }
+        .panel-hero {
+            background:
+                linear-gradient(160deg, rgba(8, 20, 35, 0.98), rgba(14, 33, 52, 0.96));
+            border: 1px solid rgba(174, 132, 80, 0.18);
+            color: #f4ede2;
+        }
+        .panel-ops {
+            background:
+                linear-gradient(180deg, rgba(251, 248, 241, 0.98), rgba(245, 239, 230, 0.96));
         }
         .hero-kicker {
             text-transform: uppercase;
-            letter-spacing: 0.20em;
-            font-size: 0.76rem;
+            letter-spacing: 0.22em;
+            font-size: 0.72rem;
             font-weight: 700;
-            color: var(--accent);
-            margin-bottom: 0.45rem;
+            color: #d2b180;
+            margin-bottom: 0.55rem;
         }
         .hero-title {
-            font-size: 2.45rem;
+            font-size: 2.7rem;
             line-height: 0.98;
-            color: var(--ink);
-            margin: 0 0 0.95rem 0;
-            font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
-            letter-spacing: -0.03em;
+            color: #f9f3ea;
+            margin: 0 0 0.9rem 0;
+            font-family: "Canela", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+            letter-spacing: -0.035em;
         }
         .hero-copy, .micro-copy {
             color: var(--muted);
-            font-size: 0.99rem;
-            line-height: 1.66;
+            font-size: 0.98rem;
+            line-height: 1.68;
+        }
+        .panel-hero .hero-copy,
+        .panel-hero .micro-copy {
+            color: rgba(244, 237, 226, 0.84);
+        }
+        .hero-band {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        .hero-band-item {
+            padding: 0.9rem 0.95rem;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(210, 177, 128, 0.14);
+        }
+        .hero-band-label {
+            display: block;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: rgba(244, 237, 226, 0.58);
+            margin-bottom: 0.35rem;
+        }
+        .hero-band-value {
+            font-size: 0.95rem;
+            color: #f4ede2;
+            font-weight: 700;
+            line-height: 1.35;
+        }
+        .section-overline {
+            text-transform: uppercase;
+            letter-spacing: 0.16em;
+            font-size: 0.72rem;
+            color: var(--gold);
+            font-weight: 800;
+            margin-bottom: 0.45rem;
+        }
+        .panel-title {
+            font-size: 1.35rem;
+            font-family: "Iowan Old Style", "Palatino Linotype", serif;
+            letter-spacing: -0.02em;
+            color: var(--ink);
+            margin-bottom: 0.7rem;
         }
         .budget-card {
             padding: 1.05rem 1.05rem;
-            border-radius: 22px;
-            background: linear-gradient(145deg, rgba(15, 118, 110, 0.22), rgba(29, 78, 216, 0.18));
-            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+            border: 1px solid rgba(210, 177, 128, 0.16);
             margin-bottom: 1rem;
-            box-shadow: 0 16px 36px rgba(4, 17, 32, 0.22);
+            box-shadow: 0 16px 36px rgba(2, 10, 18, 0.22);
         }
         .budget-number {
-            font-size: 2.15rem;
+            font-size: 2.2rem;
             font-weight: 800;
-            color: #f7fbff;
+            color: #f7efe3;
             line-height: 1.1;
         }
         .budget-label {
             font-size: 0.82rem;
             text-transform: uppercase;
             letter-spacing: 0.10em;
-            color: rgba(244, 248, 251, 0.74);
+            color: rgba(242, 233, 221, 0.62);
             margin-bottom: 0.35rem;
         }
         .sidebar-note {
             padding: 0.9rem 1rem;
-            border-radius: 18px;
-            background: rgba(255, 255, 255, 0.08);
-            border: 1px solid rgba(255, 255, 255, 0.10);
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(210, 177, 128, 0.12);
             margin-bottom: 0.75rem;
             font-size: 0.92rem;
             line-height: 1.45;
-            backdrop-filter: blur(12px);
         }
         .summary-chip {
             display: inline-block;
@@ -161,43 +213,44 @@ def inject_styles() -> None:
             border-radius: 999px;
             margin-right: 0.45rem;
             margin-bottom: 0.45rem;
-            background: linear-gradient(145deg, rgba(15, 118, 110, 0.10), rgba(29, 78, 216, 0.10));
+            background: linear-gradient(145deg, rgba(174, 132, 80, 0.10), rgba(8, 20, 35, 0.04));
             color: var(--ink);
             font-weight: 700;
             font-size: 0.82rem;
-            border: 1px solid rgba(18, 38, 58, 0.08);
+            border: 1px solid rgba(23, 36, 55, 0.10);
         }
         .workflow-step {
-            padding: 0.78rem 0.9rem;
-            border-radius: 18px;
-            background: linear-gradient(180deg, rgba(238, 244, 250, 0.86), rgba(247, 251, 255, 0.80));
+            padding: 0.85rem 0.92rem;
+            border-radius: 15px;
+            background: linear-gradient(180deg, rgba(255, 251, 245, 0.98), rgba(246, 240, 229, 0.92));
             border: 1px solid var(--line);
             margin-bottom: 0.6rem;
         }
         .metric-strip {
             padding: 0.95rem 1rem;
-            border-radius: 20px;
-            background: rgba(255, 255, 255, 0.90);
+            border-radius: 18px;
+            background: rgba(251, 248, 241, 0.92);
             border: 1px solid var(--line);
-            box-shadow: 0 16px 32px rgba(18, 38, 58, 0.07);
+            box-shadow: 0 16px 32px rgba(18, 38, 58, 0.06);
         }
         .section-title {
-            font-size: 1.1rem;
+            font-size: 1.0rem;
             color: var(--ink);
             margin-bottom: 0.5rem;
-            font-weight: 700;
+            font-weight: 800;
+            letter-spacing: 0.02em;
         }
         .horizon-card {
-            padding: 1.02rem 1.08rem;
-            border-radius: 22px;
-            background:
-                linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(245, 250, 255, 0.92));
+            padding: 1.08rem 1.08rem;
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(251, 248, 241, 0.98), rgba(245, 239, 230, 0.94));
             border: 1px solid var(--line);
-            box-shadow: 0 16px 36px rgba(18, 38, 58, 0.08);
+            box-shadow: 0 14px 28px rgba(18, 38, 58, 0.06);
         }
         .horizon-card h4 {
             margin: 0 0 0.35rem 0;
             color: var(--ink);
+            font-family: "Iowan Old Style", "Palatino Linotype", serif;
         }
         .horizon-card p {
             margin: 0.2rem 0;
@@ -205,17 +258,17 @@ def inject_styles() -> None:
         }
         .guide-card {
             padding: 1.05rem 1.1rem;
-            border-radius: 24px;
-            background:
-                linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 250, 255, 0.90));
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(251, 248, 241, 0.96), rgba(245, 239, 230, 0.94));
             border: 1px solid var(--line);
             min-height: 100%;
-            box-shadow: 0 18px 40px rgba(18, 38, 58, 0.07);
+            box-shadow: 0 18px 32px rgba(18, 38, 58, 0.06);
         }
         .guide-card h4 {
             margin-top: 0;
             color: var(--ink);
             letter-spacing: -0.01em;
+            font-family: "Iowan Old Style", "Palatino Linotype", serif;
         }
         .status-pill-good, .status-pill-neutral, .status-pill-warn {
             display: inline-block;
@@ -226,48 +279,93 @@ def inject_styles() -> None:
             margin-right: 0.45rem;
         }
         .status-pill-good {
-            background: rgba(15, 118, 110, 0.15);
-            color: #0f766e;
+            background: rgba(14, 102, 101, 0.13);
+            color: #0e6665;
         }
         .status-pill-neutral {
-            background: rgba(29, 78, 216, 0.13);
-            color: #1d4ed8;
+            background: rgba(35, 77, 132, 0.12);
+            color: #234d84;
         }
         .status-pill-warn {
-            background: rgba(194, 106, 18, 0.16);
-            color: #b45309;
+            background: rgba(165, 61, 50, 0.12);
+            color: #a53d32;
         }
         section[data-testid="stMain"] div[data-testid="stMetric"] {
-            background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 250, 255, 0.90));
-            border: 1px solid rgba(18, 38, 58, 0.08);
-            border-radius: 22px;
-            padding: 0.9rem 1rem;
-            box-shadow: 0 16px 34px rgba(18, 38, 58, 0.08);
+            background: linear-gradient(180deg, rgba(251, 248, 241, 0.98), rgba(244, 237, 228, 0.95));
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            padding: 0.95rem 1rem;
+            box-shadow: 0 14px 26px rgba(18, 38, 58, 0.06);
         }
         section[data-testid="stMain"] div[data-testid="stMetric"] label,
         section[data-testid="stMain"] div[data-testid="stMetric"] div {
             color: var(--ink);
         }
+        section[data-testid="stMain"] div[data-testid="stMetricLabel"] {
+            font-size: 0.78rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
         section[data-testid="stMain"] .stTabs [data-baseweb="tab-list"] {
             gap: 0.4rem;
         }
         section[data-testid="stMain"] .stTabs [data-baseweb="tab"] {
-            background: rgba(255, 255, 255, 0.75);
-            border: 1px solid rgba(18, 38, 58, 0.08);
-            border-radius: 16px;
+            background: rgba(248, 243, 234, 0.92);
+            border: 1px solid var(--line);
+            border-radius: 14px;
             color: var(--ink);
-            padding: 0.25rem 0.6rem;
+            padding: 0.32rem 0.72rem;
         }
         section[data-testid="stMain"] .stTabs [aria-selected="true"] {
-            background: linear-gradient(145deg, rgba(15, 118, 110, 0.16), rgba(29, 78, 216, 0.14));
+            background: linear-gradient(145deg, rgba(174, 132, 80, 0.16), rgba(8, 20, 35, 0.08));
             color: var(--ink);
+            border-color: rgba(174, 132, 80, 0.26);
         }
         section[data-testid="stMain"] div[data-testid="stAlert"],
         section[data-testid="stMain"] div[data-testid="stDataFrame"] {
             color: var(--ink);
         }
+        section[data-testid="stMain"] div[data-testid="stAlert"] *,
+        section[data-testid="stMain"] div[data-testid="stDataFrame"] *,
+        section[data-testid="stMain"] div[data-testid="stCaptionContainer"] *,
+        section[data-testid="stMain"] .stCaption,
+        section[data-testid="stMain"] code {
+            color: var(--ink) !important;
+        }
+        .panel-hero h1,
+        .panel-hero h2,
+        .panel-hero h3,
+        .panel-hero h4,
+        .panel-hero p,
+        .panel-hero span,
+        .panel-hero div {
+            color: #f4ede2 !important;
+        }
+        section[data-testid="stMain"] div[data-testid="stPlotlyChart"] {
+            background: linear-gradient(180deg, rgba(251, 248, 241, 0.94), rgba(244, 237, 228, 0.90));
+            border: 1px solid var(--line);
+            border-radius: 18px;
+            padding: 0.35rem 0.35rem 0.1rem 0.35rem;
+            box-shadow: 0 14px 24px rgba(18, 38, 58, 0.05);
+        }
+        div[data-testid="stButton"] > button {
+            border-radius: 14px;
+            border: 1px solid rgba(210, 177, 128, 0.22);
+            background: linear-gradient(180deg, #f4ede2, #e9decd);
+            color: #142033;
+            font-weight: 800;
+        }
+        div[data-testid="stSidebar"] div[data-testid="stButton"] > button {
+            background: linear-gradient(180deg, #c4a06f, #a97e4b);
+            color: #0b1626;
+            border: 1px solid rgba(255, 255, 255, 0.10);
+        }
         @media (max-width: 1100px) {
             .hero-grid {
+                grid-template-columns: 1fr;
+            }
+            .hero-band {
                 grid-template-columns: 1fr;
             }
         }
@@ -279,6 +377,7 @@ def inject_styles() -> None:
 
 def _run_analysis(
     query: str,
+    analysis_mode: str,
     history_years: int,
     projection_years: int,
     valuation_simulations: int,
@@ -288,33 +387,41 @@ def _run_analysis(
     tax_rate: float,
     force_refresh: bool,
     use_live_quote: bool,
-) -> tuple[object, dict, dict]:
+) -> tuple[object, dict, dict, dict]:
     dataset = fetch_stock_dataset(
         query,
         history_years=history_years,
         force_refresh=force_refresh,
         use_live_quote=use_live_quote,
+        analysis_mode=analysis_mode,
     )
     valuation: dict[str, Any]
     forecast: dict[str, Any]
+    mode_report: dict[str, Any]
     valuation_error: str | None = None
     forecast_error: str | None = None
 
-    try:
-        valuation = build_valuation_report(
-            dataset,
-            ValuationConfig(
-                projection_years=projection_years,
-                simulations=valuation_simulations,
-                equity_risk_premium=equity_risk_premium,
-                debt_spread=debt_spread,
-                tax_rate=tax_rate,
-            ),
-        )
-        valuation["available"] = True
-    except ValuationError as exc:
-        valuation_error = str(exc)
-        valuation = {"available": False, "error": valuation_error}
+    if analysis_mode == "long_term":
+        try:
+            valuation = build_valuation_report(
+                dataset,
+                ValuationConfig(
+                    projection_years=projection_years,
+                    simulations=valuation_simulations,
+                    equity_risk_premium=equity_risk_premium,
+                    debt_spread=debt_spread,
+                    tax_rate=tax_rate,
+                ),
+            )
+            valuation["available"] = True
+        except ValuationError as exc:
+            valuation_error = str(exc)
+            valuation = {"available": False, "error": valuation_error}
+    else:
+        valuation = {
+            "available": False,
+            "error": "Το short-term mode δεν απαιτεί full intrinsic valuation και αποφεύγει επίτηδες το βαρύτερο SEC-dependent rail.",
+        }
 
     try:
         forecast = build_forecast_report(
@@ -330,17 +437,27 @@ def _run_analysis(
         forecast_error = str(exc)
         forecast = {"available": False, "error": forecast_error}
 
-    if not valuation["available"] and not forecast["available"]:
+    if analysis_mode == "short_term":
+        mode_report = build_short_term_report(dataset, forecast, valuation if valuation.get("available") else None)
+    else:
+        mode_report = build_long_term_report(dataset, valuation if valuation.get("available") else None)
+
+    if analysis_mode == "short_term" and not forecast["available"]:
+        raise DataRetrievalError(
+            f"Δεν ήταν δυνατό να βγει usable short-term forecast. Forecast: {forecast_error or 'N/A'}"
+        )
+    if analysis_mode == "long_term" and not valuation["available"] and not forecast["available"]:
         raise DataRetrievalError(
             f"Δεν ήταν δυνατό να βγει usable valuation ή forecast. "
             f"Valuation: {valuation_error or 'N/A'} | Forecast: {forecast_error or 'N/A'}"
         )
-    return dataset, valuation, forecast
+    return dataset, valuation, forecast, mode_report
 
 
 @st.cache_data(show_spinner=False, ttl=1800)
 def _run_analysis_cached(
     query: str,
+    analysis_mode: str,
     history_years: int,
     projection_years: int,
     valuation_simulations: int,
@@ -349,9 +466,10 @@ def _run_analysis_cached(
     debt_spread: float,
     tax_rate: float,
     use_live_quote: bool,
-) -> tuple[object, dict, dict]:
+) -> tuple[object, dict, dict, dict]:
     return _run_analysis(
         query=query,
+        analysis_mode=analysis_mode,
         history_years=history_years,
         projection_years=projection_years,
         valuation_simulations=valuation_simulations,
@@ -366,6 +484,7 @@ def _run_analysis_cached(
 
 def run_analysis(
     query: str,
+    analysis_mode: str,
     history_years: int,
     projection_years: int,
     valuation_simulations: int,
@@ -375,10 +494,11 @@ def run_analysis(
     tax_rate: float,
     force_refresh: bool,
     use_live_quote: bool,
-) -> tuple[object, dict, dict]:
+) -> tuple[object, dict, dict, dict]:
     if force_refresh:
         return _run_analysis(
             query=query,
+            analysis_mode=analysis_mode,
             history_years=history_years,
             projection_years=projection_years,
             valuation_simulations=valuation_simulations,
@@ -392,6 +512,7 @@ def run_analysis(
 
     return _run_analysis_cached(
         query=query,
+        analysis_mode=analysis_mode,
         history_years=history_years,
         projection_years=projection_years,
         valuation_simulations=valuation_simulations,
@@ -427,6 +548,7 @@ def _compute_profile(valuation_simulations: int, forecast_simulations: int, hist
 
 
 def _settings_impact_lines(
+    analysis_mode: str,
     history_years: int,
     projection_years: int,
     valuation_simulations: int,
@@ -457,6 +579,7 @@ def _settings_impact_lines(
     quote_note = "Θα ζητήσει extra live quote call." if use_live_quote else "Θα χρησιμοποιήσει latest close από cached/FMP history."
     refresh_note = "Θα αγνοήσει πλήρως το cache." if force_refresh else "Θα αξιοποιήσει local cache όπου υπάρχει."
     return [
+        f"`Mode`: {'Short Term' if analysis_mode == 'short_term' else 'Long Term'}",
         f"`History {history_years}y`: {history_note}",
         f"`DCF {projection_years}y`: {projection_note}",
         f"`Valuation sims {valuation_simulations:,}`: {valuation_note}",
@@ -535,6 +658,7 @@ def make_price_forecast_chart(price_history: pd.DataFrame, forecast: dict) -> go
         title="Historical price and probabilistic forecast fan",
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0.78)",
+        font={"color": "#172437", "family": "Avenir Next, Segoe UI, sans-serif"},
         legend_orientation="h",
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
         height=470,
@@ -572,6 +696,7 @@ def make_valuation_distribution_chart(valuation: dict, current_price: float) -> 
         title="Monte Carlo DCF intrinsic value distribution",
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0.78)",
+        font={"color": "#172437", "family": "Avenir Next, Segoe UI, sans-serif"},
         bargap=0.04,
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
         height=420,
@@ -601,6 +726,7 @@ def make_regime_chart(forecast: dict) -> go.Figure:
         yaxis={"tickformat": ".0%", "range": [0, 1]},
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0.78)",
+        font={"color": "#172437", "family": "Avenir Next, Segoe UI, sans-serif"},
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
         height=380,
     )
@@ -632,6 +758,7 @@ def make_scenario_chart(valuation: dict, currency: str, current_price: float) ->
         title=valuation.get("scenario_title", "Bear / Base / Bull valuation scenarios"),
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0.78)",
+        font={"color": "#172437", "family": "Avenir Next, Segoe UI, sans-serif"},
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
         height=380,
     )
@@ -659,6 +786,7 @@ def make_sensitivity_heatmap(valuation: dict, currency: str) -> go.Figure:
         title=valuation.get("sensitivity_title", "Valuation sensitivity"),
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0.78)",
+        font={"color": "#172437", "family": "Avenir Next, Segoe UI, sans-serif"},
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
         height=420,
     )
@@ -710,6 +838,7 @@ def make_fundamental_trend_chart(valuation: dict, currency: str) -> go.Figure:
         title="Reported valuation anchors",
         paper_bgcolor="rgba(255,255,255,0)",
         plot_bgcolor="rgba(255,255,255,0.78)",
+        font={"color": "#172437", "family": "Avenir Next, Segoe UI, sans-serif"},
         margin={"l": 20, "r": 20, "t": 60, "b": 20},
         height=400,
     )
@@ -743,6 +872,8 @@ def format_mixed_value(label: str, value: Any, currency: str) -> str:
         return format_percent(float(value))
     if "score" in label_lower and "valuation" not in label_lower:
         return f"{int(round(float(value)))}"
+    if any(token in label_lower for token in ("year", "years", "horizon")):
+        return f"{int(round(float(value)))}"
     return format_currency(float(value), currency)
 
 
@@ -759,32 +890,384 @@ def render_takeaways(title: str, items: list[str]) -> None:
     )
 
 
+def render_section_intro(title: str, copy: str) -> None:
+    st.markdown(
+        f"""
+        <div class="guide-card" style="margin-bottom: 0.85rem;">
+            <h4>{title}</h4>
+            <p>{copy}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _summary_table(
+    dataset: object,
+    valuation: dict[str, Any],
+    forecast: dict[str, Any],
+    mode_report: dict[str, Any],
+    analysis_mode: str,
+) -> pd.DataFrame:
+    valuation_available = bool(valuation.get("available"))
+    forecast_available = bool(forecast.get("available"))
+    rows: list[tuple[str, str, str]] = [
+        (
+            "Current price",
+            format_currency(dataset.current_price, dataset.currency),
+            "Η τελευταία usable τιμή πάνω στην οποία πατά όλη η ανάλυση.",
+        ),
+    ]
+
+    if analysis_mode == "short_term":
+        rows.extend(
+            [
+                (
+                    "Trade setup",
+                    mode_report.get("setup", "N/A") if mode_report.get("available") else "N/A",
+                    "Η συνολική short-term ποιότητα του setup αφού συνδυαστούν forecast edge, stress, jump risk και event risk.",
+                ),
+                (
+                    "Action",
+                    mode_report.get("action", "N/A") if mode_report.get("available") else "N/A",
+                    "Η πειθαρχημένη έξοδος του short-term layer: actionable, watch ή no-trade.",
+                ),
+                (
+                    "Best horizon",
+                    mode_report.get("best_horizon", "N/A") if mode_report.get("available") else "N/A",
+                    "Το horizon όπου το μοντέλο βλέπει το καλύτερο risk-adjusted edge αυτή τη στιγμή.",
+                ),
+                (
+                    "Expected edge",
+                    format_percent(mode_report.get("expected_edge")) if mode_report.get("available") else "N/A",
+                    "Ένας συντηρητικός edge proxy που συνδυάζει mean path, upside probabilities, downside tails και event penalties.",
+                ),
+                (
+                    "Signal confidence",
+                    f"{mode_report.get('signal_confidence', 'N/A')}/100" if mode_report.get("available") else "N/A",
+                    "Πόσο πολύ αξίζει να εμπιστευτούμε το short-term signal αφού λάβουμε υπόψη calibration και data quality.",
+                ),
+            ]
+        )
+    else:
+        rows.extend(
+            [
+                (
+                    "Fundamental value",
+                    format_currency(valuation["percentiles"]["p50"], dataset.currency) if valuation_available else "N/A",
+                    "Η median εκτίμηση του intrinsic value distribution. Δεν είναι υπόσχεση τιμής, αλλά το κεντρικό fair-value anchor.",
+                ),
+                (
+                    "Valuation verdict",
+                    valuation["verdict"] if valuation_available else "N/A",
+                    "Το συμπέρασμα του valuation engine αφού δει range, probability και uncertainty.",
+                ),
+                (
+                    "Long-term stance",
+                    mode_report.get("stance", "N/A") if mode_report.get("available") else "N/A",
+                    "Η long-term σύνθεση intrinsic value, profitability, balance-sheet resilience και forward estimate anchor.",
+                ),
+                (
+                    "Margin of safety",
+                    format_percent(valuation["margin_of_safety"]) if valuation_available else "N/A",
+                    "Πόσο πάνω ή κάτω κάθεται το fair-value anchor σε σχέση με την τρέχουσα τιμή.",
+                ),
+                (
+                    "Probability undervalued",
+                    format_percent(valuation["probability_undervalued"]) if valuation_available else "N/A",
+                    "Το ποσοστό των simulated fair values που βγαίνουν πάνω από τη σημερινή τιμή.",
+                ),
+                (
+                    "Valuation confidence",
+                    f"{valuation['confidence']['label']} ({valuation['confidence']['score']}/100)" if valuation_available else "N/A",
+                    "Πόσο πολύ εμπιστευόμαστε το valuation output με βάση data quality, model suitability και dispersion.",
+                ),
+                (
+                    "Long-term score",
+                    f"{mode_report.get('overall_score', 'N/A')}/100" if mode_report.get("available") else "N/A",
+                    "Η συνολική long-term κρίση του app αφού συνδυάσει valuation και ποιοτικά financial pillars.",
+                ),
+            ]
+        )
+
+    rows.extend(
+        [
+            (
+                "Data quality",
+                f"{valuation['data_quality']['label']} ({valuation['data_quality']['score']}/100)" if valuation_available and valuation.get("data_quality") else dataset.raw_info.get("coverage_label", "N/A"),
+                "Πόσο δυνατή είναι η βάση δεδομένων της συγκεκριμένης ανάλυσης πριν καν μπούμε στα μαθηματικά μοντέλα.",
+            ),
+        (
+            "Forecast quality",
+            f"{forecast['calibration']['label']} ({forecast['calibration']['score']}/100)" if forecast_available else "N/A",
+            "Πόσο καλά έχει σταθεί πρόσφατα το probabilistic forecast engine σε direction, volatility και interval coverage.",
+        ),
+        (
+            "Current regime",
+            (
+                f"{forecast['current_regime']} ({format_percent(forecast['current_regime_probability'])})"
+                if forecast_available
+                else "N/A"
+            ),
+            "Το regime που το μοντέλο θεωρεί πιο πιθανό αυτή τη στιγμή για τη μετοχή.",
+        ),
+        (
+            "Coverage",
+            dataset.raw_info.get("coverage_label", "N/A"),
+            "Μια γρήγορη ένδειξη για το πόσο σταθερή ή εύθραυστη είναι η κάλυψη του ticker στο free stack.",
+        ),
+    ])
+    return pd.DataFrame(rows, columns=["Item", "Value", "What It Means"])
+
+
+def _input_meaning(label: str) -> str:
+    mapping = {
+        "Method": "Το valuation rail που επιλέχθηκε για αυτή την εταιρεία.",
+        "Starting revenue": "Το πιο πρόσφατο annual revenue που χρησιμοποιείται σαν βάση για το projection.",
+        "Starting EBIT margin": "Το operating profitability point από το οποίο ξεκινά το explicit forecast.",
+        "Target EBIT margin": "Το margin προς το οποίο υποθέτει το μοντέλο ότι συγκλίνει η εταιρεία.",
+        "Revenue growth": "Ο αρχικός ρυθμός ανάπτυξης που τροφοδοτεί την explicit phase του FCFF model.",
+        "Sales to capital": "Δείχνει πόσο αποδοτικά η εταιρεία μετατρέπει reinvestment σε νέο revenue.",
+        "Terminal growth": "Ο μακροχρόνιος ρυθμός ανάπτυξης μετά την explicit forecast περίοδο.",
+        "Risk-free rate": "Η βάση πάνω στην οποία χτίζεται το cost of capital.",
+        "Beta used": "Η beta μετά από shrinkage, ώστε να μη γίνεται υπερευαίσθητη σε noisy market history.",
+        "Cost of equity": "Η απαιτούμενη απόδοση των μετόχων με βάση risk-free και equity risk premium.",
+        "Cost of debt": "Το κόστος δανεισμού που χρησιμοποιείται μέσα στο WACC.",
+        "WACC": "Το blended discount rate για FCFF valuation.",
+        "Net cash / debt": "Προστίθεται ή αφαιρείται όταν περνάμε από enterprise value σε equity value.",
+        "User-selected DCF years": "Τα explicit forecast years που διάλεξες από το sidebar.",
+        "Effective DCF years": "Τα years που τελικά χρησιμοποίησε το model μετά την προσαρμογή για growth profile.",
+        "Market-implied stage-1 growth": "Το growth που φαίνεται να ζητά η αγορά για να δικαιολογεί την τωρινή τιμή.",
+        "90% intrinsic range": "Το εύρος μεταξύ p05 και p95. Όσο πιο φαρδύ, τόσο μεγαλύτερη η αβεβαιότητα.",
+        "Book value / share": "Η λογιστική καθαρή θέση ανά μετοχή.",
+        "Starting ROE": "Η απόδοση ιδίων κεφαλαίων από την οποία ξεκινά το residual-income model.",
+        "Terminal ROE": "Το ROE προς το οποίο συγκλίνει το residual-income projection.",
+        "Retention rate": "Το ποσοστό κερδών που θεωρείται ότι μένει μέσα στην επιχείρηση.",
+    }
+    return mapping.get(label, "Input του valuation engine που επηρεάζει την τελική εκτίμηση fair value.")
+
+
+def _ratio_meaning(label: str) -> str:
+    mapping = {
+        "P/E": "Πόσες φορές τα κέρδη πληρώνει σήμερα η αγορά.",
+        "PEG": "Συνδέει το P/E με το growth για να δείξει αν το premium στηρίζεται από ανάπτυξη.",
+        "P/B": "Πόσες φορές τη λογιστική καθαρή θέση αποτιμά η αγορά.",
+        "EV/EBITDA": "Σχετικός πολλαπλασιαστής για λειτουργική αξία πριν από D&A και capital structure.",
+        "ROE": "Πόσο αποδοτικά μετατρέπει η εταιρεία τα ίδια κεφάλαια σε κέρδη.",
+        "Profit margin": "Τι ποσοστό του revenue μένει τελικά ως καθαρό κέρδος.",
+    }
+    return mapping.get(label, "Σχετικός δείκτης για το πώς τιμολογείται ή αποδίδει η εταιρεία.")
+
+
+def _forecast_metric_meaning(label: str) -> str:
+    mapping = {
+        "Model": "Ο συνδυασμός μοντέλων που χρησιμοποιήθηκε για το short-term forecast.",
+        "Current regime": "Η πιθανότερη φάση αγοράς/συμπεριφοράς για τη μετοχή αυτή τη στιγμή.",
+        "Current regime probability": "Πόσο σίγουρο είναι το regime model για το τρέχον state.",
+        "Forecast quality": "Συνοπτική αξιολόγηση του calibration του forecast engine.",
+        "Daily jump probability": "Η πιθανότητα να εμφανιστεί ακραίο ημερήσιο shock στο simulation.",
+        "Context drift bias": "Η καθαρή μετατόπιση στο drift από market-context features και proxies.",
+        "Opportunity score": "Composite score που μετρά πόσο risk-on / favorable είναι το setup.",
+        "Stress score": "Composite score που μετρά market stress, volatility pressure και αμυντική συμπεριφορά.",
+        "Geopolitical proxy score": "Score που διαβάζει risk-off σήματα από oil, gold, dollar, rates και GPR proxies.",
+        "Behavior score": "Score που διαβάζει momentum/reversal/breadth συμπεριφορά.",
+        "AR(1) intercept": "Η σταθερή συνιστώσα του mean model στα daily returns.",
+        "AR(1) phi": "Το πόσο persistent είναι το χθεσινό return στο σημερινό forecast drift.",
+    }
+    return mapping.get(label, "Forecast diagnostic που βοηθά να διαβαστεί το probabilistic αποτέλεσμα.")
+
+
 def render_horizon_cards(horizon_summary: list[dict], currency: str) -> None:
-    columns = st.columns(3)
-    for column, horizon in zip(columns, horizon_summary):
-        with column:
-            st.markdown(
-                f"""
-                <div class="horizon-card">
-                    <h4>{horizon["label"]}</h4>
-                    <p><strong>Median:</strong> {format_currency(horizon["median"], currency)}</p>
-                    <p><strong>90% range:</strong> {format_currency(horizon["p05"], currency)} - {format_currency(horizon["p95"], currency)}</p>
-                    <p><strong>P(upside):</strong> {format_percent(horizon["probability_upside"])}</p>
-                    <p><strong>P(>+5%):</strong> {format_percent(horizon["probability_up_5pct"])}</p>
-                </div>
-                """,
-                unsafe_allow_html=True,
+    frame = pd.DataFrame(
+        [
+            {
+                "Horizon": horizon["label"],
+                "Median": format_currency(horizon["median"], currency),
+                "90% Range": f"{format_currency(horizon['p05'], currency)} - {format_currency(horizon['p95'], currency)}",
+                "P(Upside)": format_percent(horizon["probability_upside"]),
+                "P(>+5%)": format_percent(horizon["probability_up_5pct"]),
+            }
+            for horizon in horizon_summary
+        ]
+    )
+    st.dataframe(frame, use_container_width=True, hide_index=True)
+
+
+def render_short_term_report(mode_report: dict[str, Any], currency: str) -> None:
+    if not mode_report.get("available"):
+        st.warning(mode_report.get("error", "Το short-term report δεν ήταν διαθέσιμο."))
+        return
+
+    st.markdown("### Trading Stance")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                ("Setup", mode_report["setup"], "Η συνολική ποιότητα του short-term setup."),
+                ("Action", mode_report["action"], "Η πρακτική έξοδος του trade-decision layer."),
+                ("Trade setup score", f"{mode_report['trade_setup_score']}/100", "Ο συνολικός short-term score αφού συνδυαστούν edge, calibration, stress και event risk."),
+                ("Signal confidence", f"{mode_report['signal_confidence']}/100", "Το πόσο εμπιστευόμαστε ότι το short-term signal έχει χρηστική αξία."),
+                ("Best horizon", mode_report["best_horizon"], "Το horizon όπου το μοντέλο βλέπει το καθαρότερο risk-adjusted edge."),
+                ("Expected edge", format_percent(mode_report["expected_edge"]), "Συντηρητικό edge proxy μετά από downside και event penalties."),
+            ],
+            columns=["Trading item", "Value", "What It Means"],
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("### Horizon Edge Map")
+    horizon_frame = pd.DataFrame(mode_report["horizon_table"]).copy()
+    horizon_frame["mean_return"] = horizon_frame["mean_return"].map(format_percent)
+    horizon_frame["median_return"] = horizon_frame["median_return"].map(format_percent)
+    horizon_frame["probability_upside"] = horizon_frame["probability_upside"].map(format_percent)
+    horizon_frame["probability_up_5pct"] = horizon_frame["probability_up_5pct"].map(format_percent)
+    horizon_frame["probability_down_5pct"] = horizon_frame["probability_down_5pct"].map(format_percent)
+    horizon_frame["expected_max_drawdown"] = horizon_frame["expected_max_drawdown"].map(format_percent)
+    horizon_frame["expected_edge"] = horizon_frame["expected_edge"].map(format_percent)
+    horizon_frame["edge_score"] = horizon_frame["edge_score"].map(lambda value: f"{value:.0f}/100")
+    horizon_frame["event_penalty"] = horizon_frame["event_penalty"].map(format_percent)
+    st.dataframe(
+        horizon_frame.rename(
+            columns={
+                "horizon": "Horizon",
+                "days": "Days",
+                "mean_return": "Mean Return",
+                "median_return": "Median Return",
+                "probability_upside": "P(Upside)",
+                "probability_up_5pct": "P(>+5%)",
+                "probability_down_5pct": "P(<-5%)",
+                "expected_max_drawdown": "Expected Max Drawdown",
+                "expected_edge": "Expected Edge",
+                "edge_score": "Edge Score",
+                "event_penalty": "Event Penalty",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    event = mode_report.get("event_risk", {})
+    st.markdown("### Event Risk")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                ("Event date", event.get("event_date", "N/A"), "Η πιο κοντινή earnings/event ημερομηνία που βρήκε το free data stack."),
+                ("Days to event", str(event.get("days_to_event", "N/A")), "Πόσο κοντά ή μακριά είναι το event από το σήμερα."),
+                ("Release timing", event.get("time", "N/A"), "Αν ο provider έδωσε timing τύπου BMO/AMC ή παρόμοιο marker."),
+                ("Event window active", "Yes" if event.get("event_window_active") else "No", "Αν είμαστε μέσα στο παράθυρο όπου το μοντέλο κόβει score λόγω event risk."),
+            ],
+            columns=["Event item", "Value", "What It Means"],
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    exit_window = mode_report.get("exit_window", {})
+    if exit_window.get("best_window"):
+        st.markdown("### Exit Timing Window")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    ("Target price", format_currency(exit_window.get("target_price"), currency) if exit_window.get("target_price") is not None else "N/A", "Το tactical target που χρησιμοποιεί το exit engine για να μετρήσει first-passage probabilities."),
+                    ("Stop reference", format_currency(exit_window.get("stop_price"), currency) if exit_window.get("stop_price") is not None else "N/A", "Το downside reference του ίδιου timing engine."),
+                    ("Best exit day", f"Day {exit_window.get('best_day')}" if exit_window.get("best_day") is not None else "N/A", "Η ημέρα με το καλύτερο συνδυαστικό exit score."),
+                    ("Best exit window", exit_window.get("best_window", "N/A"), "Ένα πιο ανθρώπινο window εξόδου γύρω από την κορυφή του exit score."),
+                    ("Median days to target", f"{exit_window['median_days_to_target']:.1f}" if exit_window.get("median_days_to_target") is not None else "N/A", "Σε πόσες περίπου συνεδριάσεις φτάνουν το target τα paths που το πετυχαίνουν."),
+                ],
+                columns=["Timing item", "Value", "What It Means"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        exit_rows = pd.DataFrame(exit_window.get("rows", [])).copy()
+        if not exit_rows.empty:
+            exit_rows = exit_rows.head(10)
+            for column in (
+                "target_hit_probability",
+                "stop_hit_probability",
+                "target_first_probability",
+                "stop_first_probability",
+                "expected_return",
+                "expected_max_drawdown",
+                "regime_deterioration_probability",
+                "event_hazard",
+            ):
+                exit_rows[column] = exit_rows[column].map(format_percent)
+            exit_rows["exit_score"] = exit_rows["exit_score"].map(lambda value: f"{value:.3f}")
+            st.dataframe(
+                exit_rows.rename(
+                    columns={
+                        "day": "Day",
+                        "target_hit_probability": "P(Target By Day)",
+                        "stop_hit_probability": "P(Stop By Day)",
+                        "target_first_probability": "P(Target Before Stop)",
+                        "stop_first_probability": "P(Stop Before Target)",
+                        "expected_return": "Expected Return",
+                        "expected_max_drawdown": "Expected Max Drawdown",
+                        "regime_deterioration_probability": "P(Regime Turns Bearish)",
+                        "event_hazard": "Event Hazard",
+                        "exit_score": "Exit Score",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
+
+    render_takeaways("Short-Term Read", mode_report.get("reasons", []))
+    render_takeaways("Risk Controls", mode_report.get("risk_controls", []))
+
+
+def render_long_term_report(mode_report: dict[str, Any], currency: str) -> None:
+    if not mode_report.get("available"):
+        st.warning(mode_report.get("error", "Το long-term report δεν ήταν διαθέσιμο."))
+        return
+
+    st.markdown("### Investment Stance")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                ("Long-term stance", mode_report["stance"], "Η συνολική long-duration κρίση του app."),
+                ("Holding action", mode_report.get("holding_action", "N/A"), "Η πιο πρακτική long-term ανάγνωση του app για το αν αξίζει accumulation, απλό hold ή περισσότερη αποχή."),
+                ("Overall score", f"{mode_report['overall_score']}/100", "Η σύνθεση intrinsic value, profitability, balance-sheet quality και forward estimate anchor."),
+                ("Forward revenue growth", format_percent(mode_report.get("forward_revenue_growth")) if mode_report.get("forward_revenue_growth") is not None else "N/A", "Το κοντινό growth anchor από τα δωρεάν estimate layers όταν είναι διαθέσιμα."),
+                ("Forward EPS growth", format_percent(mode_report.get("forward_eps_growth")) if mode_report.get("forward_eps_growth") is not None else "N/A", "Το earnings-growth anchor από το ίδιο estimate layer."),
+                ("Owner earnings", format_currency(mode_report.get("owner_earnings_value"), currency) if mode_report.get("owner_earnings_value") is not None else "N/A", "Συμπληρωματικός cash-flow lens για πιο ώριμες επιχειρήσεις."),
+                ("Mean price target", format_currency(mode_report.get("price_target_mean"), currency) if mode_report.get("price_target_mean") is not None else "N/A", "Consensus-like internet-backed reference point, μόνο ως secondary lens και όχι σαν intrinsic truth."),
+            ],
+            columns=["Investment item", "Value", "What It Means"],
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    pillar_frame = pd.DataFrame(mode_report.get("pillar_rows", [])).copy()
+    if not pillar_frame.empty:
+        pillar_frame["score"] = pillar_frame["score"].map(lambda value: f"{value:.0f}/100")
+        st.markdown("### Long-Term Pillars")
+        st.dataframe(
+            pillar_frame.rename(
+                columns={
+                    "pillar": "Pillar",
+                    "score": "Score",
+                    "commentary": "What It Means",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    render_takeaways("Long-Term Read", mode_report.get("reasons", []))
 
 
 def render_sidebar_budget(budget: dict[str, Any], compute_profile: dict[str, str]) -> None:
     st.sidebar.markdown(
         f"""
         <div class="budget-card">
-            <div class="budget-label">Before You Run</div>
+            <div class="budget-label">Fresh Calls Budget</div>
             <div class="budget-number">{budget["label"]}</div>
             <div class="micro-copy" style="color: rgba(247,243,237,0.86);">
-                Estimated fresh API calls now
+                Estimated new requests for this run
             </div>
         </div>
         """,
@@ -793,7 +1276,7 @@ def render_sidebar_budget(budget: dict[str, Any], compute_profile: dict[str, str
     st.sidebar.markdown(
         f"""
         <div class="sidebar-note">
-            <strong>Compute profile:</strong> {compute_profile["label"]}<br/>
+            <strong>Compute posture:</strong> {compute_profile["label"]}<br/>
             {compute_profile["detail"]}
         </div>
         """,
@@ -805,34 +1288,60 @@ def render_sidebar_budget(budget: dict[str, Any], compute_profile: dict[str, str
         st.sidebar.caption(f"`{item['label']}`: {state}. {item['detail']}")
 
 
-def render_intro(budget: dict[str, Any], compute_profile: dict[str, str]) -> None:
+def render_intro(budget: dict[str, Any], compute_profile: dict[str, str], analysis_mode: str) -> None:
+    mandate_copy = (
+        "Ένα προσωπικό research terminal για disciplined short-horizon equity work, με "
+        "<strong>trade-decision filtering</strong>, <strong>probabilistic short-term forecasting</strong> και "
+        "<strong>event-aware market context</strong> σε ένα ενιαίο briefing."
+        if analysis_mode == "short_term"
+        else "Ένα προσωπικό research terminal για disciplined long-duration equity work, με "
+        "<strong>adaptive intrinsic valuation</strong>, <strong>market-implied expectations</strong> και "
+        "<strong>internet-backed fundamental cross-checks</strong> σε ένα ενιαίο briefing."
+    )
+    second_copy = (
+        "Στο short-term mode το app δίνει βάρος σε <strong>edge</strong>, <strong>no-trade discipline</strong>, "
+        "<strong>event risk</strong> και <strong>forecast calibration</strong>, ώστε να αποφεύγονται trades χωρίς καθαρό πλεονέκτημα."
+        if analysis_mode == "short_term"
+        else "Στο long-term mode το app προσπαθεί πρώτα να αναγνωρίσει <strong>το valuation regime της εταιρείας</strong>, "
+        "μετά να επιλέξει το καταλληλότερο framework, και στο τέλος να επιστρέψει "
+        "<strong>fair-value range</strong>, <strong>profitability / balance-sheet lenses</strong> και "
+        "<strong>confidence diagnostics</strong>."
+    )
     st.markdown(
         f"""
         <div class="hero-grid">
-            <div class="panel">
-                <div class="hero-kicker">Hybrid Valuation + Forecasting</div>
-                <div class="hero-title">Quant Equity Workbench</div>
+            <div class="panel panel-hero">
+                <div class="hero-kicker">Private Research Environment</div>
+                <div class="hero-title">Equity Research Desk</div>
                 <div class="hero-copy">
-                    Το app ενώνει <strong>DCF valuation</strong>, <strong>Monte Carlo uncertainty</strong>,
-                    <strong>Markov + GARCH probabilistic forecasting</strong> και
-                    <strong>cross-asset proxy context</strong> σε ένα ενιαίο dashboard για short-term research.
+                    {mandate_copy}
                 </div>
                 <div class="hero-copy" style="margin-top: 0.7rem;">
-                    Όταν τρέξει η ανάλυση, θα δεις μαζί:
-                    τρέχουσα τιμή, estimated intrinsic value, valuation scenarios, uncertainty bands,
-                    forecast για 1 εβδομάδα, 3 εβδομάδες και 1 μήνα, το τρέχον regime της μετοχής,
-                    καθώς και reliability diagnostics για valuation και forecasting.
-                    Στο free mode, τα prices/context έρχονται κυρίως από <strong>FMP free</strong>, με <strong>Yahoo/Stooq fallback</strong> όπου χρειάζεται,
-                    και τα fundamentals από <strong>SEC filings</strong> όπου υπάρχουν.
+                    {second_copy}
+                </div>
+                <div class="hero-band">
+                    <div class="hero-band-item">
+                        <span class="hero-band-label">Mandate</span>
+                        <span class="hero-band-value">{"Short-term execution discipline" if analysis_mode == "short_term" else "Long-term intrinsic research"}</span>
+                    </div>
+                    <div class="hero-band-item">
+                        <span class="hero-band-label">Core Engine</span>
+                        <span class="hero-band-value">{"Trade setup scoring, event risk, regime-aware forecasting" if analysis_mode == "short_term" else "Adaptive valuation, Monte Carlo, regime-aware forecasting"}</span>
+                    </div>
+                    <div class="hero-band-item">
+                        <span class="hero-band-label">Current Run</span>
+                        <span class="hero-band-value">{budget["label"]} estimated calls | {compute_profile["label"]} compute load</span>
+                    </div>
                 </div>
             </div>
-            <div class="panel">
-                <div class="section-title">Run Checklist</div>
-                <div class="workflow-step"><strong>1.</strong> Γράψε κατά προτίμηση ticker, π.χ. <code>AAPL</code>, για πιο ακριβές call budget.</div>
-                <div class="workflow-step"><strong>2.</strong> Κοίτα το <strong>estimated API calls</strong> πριν πατήσεις run.</div>
-                <div class="workflow-step"><strong>3.</strong> Διάλεξε αν θες live quote ή refresh από το API.</div>
-                <div class="workflow-step"><strong>4.</strong> Πάτησε <strong>Run Analysis</strong> και διάβασε πρώτα το snapshot, μετά valuation και τέλος forecast.</div>
-                <div class="workflow-step"><strong>Now:</strong> {budget["label"]} estimated calls | <strong>Compute:</strong> {compute_profile["label"]}</div>
+            <div class="panel panel-ops">
+                <div class="section-overline">Pre-Trade Protocol</div>
+                <div class="panel-title">Execution Discipline</div>
+                <div class="workflow-step"><strong>1.</strong> Δώσε κατά προτίμηση ticker, π.χ. <code>AAPL</code>, ώστε να έχουμε πιο καθαρό symbol mapping και call budgeting.</div>
+                <div class="workflow-step"><strong>2.</strong> Δες πρώτα το <strong>estimated fresh calls</strong>. Για προσωπική χρήση, το σωστό είναι λίγα νέα requests και πολύ cache reuse.</div>
+                <div class="workflow-step"><strong>3.</strong> Χρησιμοποίησε <strong>live quote</strong> μόνο όταν θες spot refresh και άφηνε το <strong>refresh</strong> κλειστό όταν δεν υπάρχει λόγος να κάψεις νέο fetch.</div>
+                <div class="workflow-step"><strong>4.</strong> Μετά το run, διάβασε πρώτα το <strong>{"Trading Brief" if analysis_mode == "short_term" else "Investment Brief"}</strong>, μετά το <strong>{"Signal Desk" if analysis_mode == "short_term" else "Valuation Desk"}</strong> και τέλος το <strong>Forecast Desk</strong>.</div>
+                <div class="workflow-step"><strong>Current posture:</strong> {budget["label"]} estimated calls | <strong>Compute:</strong> {compute_profile["label"]}</div>
             </div>
         </div>
         """,
@@ -844,23 +1353,24 @@ def render_guide_tab(
     settings_impact: list[str],
     budget: dict[str, Any],
     compute_profile: dict[str, str],
+    analysis_mode: str,
 ) -> None:
     guide_left, guide_right = st.columns(2)
     with guide_left:
         st.markdown(
-            """
+            f"""
             <div class="guide-card">
-                <h4>Τι κάνει το κάθε μοντέλο</h4>
-                <p><strong>DCF:</strong> δίνει valuation anchor από future cash flows, WACC και terminal growth.</p>
-                <p><strong>Residual income:</strong> λειτουργεί σαν fallback / cross-check όταν το FCF δεν είναι αρκετά καθαρό.</p>
-                <p><strong>Monte Carlo DCF:</strong> δείχνει uncertainty αντί για μία μόνο “σωστή” τιμή.</p>
-                <p><strong>Markov regimes:</strong> ξεχωρίζει bear / neutral / bull market states στα returns.</p>
-                <p><strong>AR(1) + GARCH / GJR-GARCH-t:</strong> μοντελοποιεί short-term drift, volatility clustering, leverage asymmetry και fat tails.</p>
-                <p><strong>Bootstrap + jumps:</strong> κρατά historical asymmetry και shock risk στα forecast paths.</p>
-                <p><strong>Cross-asset proxies:</strong> χρησιμοποιεί SPY, QQQ, IWM, GLD, TLT, USO, UUP και sector ETF για market behavior, risk-off και geopolitical stress proxies.</p>
-                <p><strong>Coverage label:</strong> δείχνει αν το συγκεκριμένο ticker έχει high, medium ή fragile data coverage στο free stack.</p>
-                <p><strong>Open-access GPR index:</strong> όταν είναι διαθέσιμο, προσθέτει daily geopolitical risk signal από το dataset των Caldara-Iacoviello.</p>
-                <p><strong>Calibration panel:</strong> ελέγχει αν το forecast engine ήταν πρόσφατα πιο αξιόπιστο ή πιο fragile.</p>
+                <h4>Research Stack</h4>
+                <p><strong>Selected mode:</strong> {"Short Term" if analysis_mode == "short_term" else "Long Term"}.</p>
+                <p><strong>Adaptive valuation:</strong> το app δεν περνά όλα τα tickers από ίδιο μοντέλο. Προσπαθεί πρώτα να καταλάβει τι εταιρεία έχει μπροστά του.</p>
+                <p><strong>FCFF rail:</strong> βασίζεται σε revenue, operating margin, reinvestment discipline και WACC, όχι σε τυφλό extrapolation του historical FCF.</p>
+                <p><strong>Residual income rail:</strong> ενεργοποιείται όταν το equity/book framework είναι πιο κατάλληλο από ένα generic operating-company DCF.</p>
+                <p><strong>Reverse DCF:</strong> λέει τι growth ζητά ήδη η αγορά για να στέκει η τωρινή τιμή.</p>
+                <p><strong>Monte Carlo:</strong> μετατρέπει το fair value από single number σε πιθανό range.</p>
+                <p><strong>Markov + GARCH:</strong> χαρτογραφεί regime state, volatility clustering, asymmetry και shock risk στα short-term paths.</p>
+                <p><strong>Cross-asset context:</strong> χρησιμοποιεί SPY, QQQ, IWM, GLD, TLT, USO, UUP και sector ETF σαν market-behavior and stress proxies.</p>
+                <p><strong>Confidence layer:</strong> το αποτέλεσμα δεν είναι μόνο αριθμός. Συνοδεύεται και από κρίση για το πόσο robust είναι.</p>
+                <p><strong>Mode logic:</strong> στο short-term δίνει βάρος σε edge, no-trade filtering και event risk. Στο long-term δίνει βάρος σε intrinsic value, profitability και capital structure.</p>
             </div>
             """,
             unsafe_allow_html=True,
@@ -869,8 +1379,8 @@ def render_guide_tab(
         st.markdown(
             f"""
             <div class="guide-card">
-                <h4>Τι αλλάζει τώρα με τα settings σου</h4>
-                <p><strong>Estimated calls:</strong> {budget["label"]}</p>
+                <h4>Current Operating Setup</h4>
+                <p><strong>Estimated fresh calls:</strong> {budget["label"]}</p>
                 <p><strong>Compute profile:</strong> {compute_profile["label"]}</p>
                 <p class="micro-copy">{budget["note"]}</p>
             </div>
@@ -885,7 +1395,14 @@ def main() -> None:
     inject_styles()
 
     with st.sidebar:
-        st.markdown("## Analysis Controls")
+        st.markdown("## Research Controls")
+        analysis_mode_label = st.radio(
+            "Research horizon",
+            options=["Short Term", "Long Term"],
+            horizontal=True,
+            help="Το short-term δίνει βάρος σε trade setup, no-trade gating και event risk. Το long-term δίνει βάρος σε intrinsic valuation και fundamental quality.",
+        )
+        analysis_mode = "short_term" if analysis_mode_label == "Short Term" else "long_term"
         query = st.text_input(
             "Ticker or company",
             value=st.session_state.get("query_value", "AAPL"),
@@ -901,8 +1418,8 @@ def main() -> None:
         projection_years = st.slider(
             "DCF forecast years",
             min_value=4,
-            max_value=10,
-            value=5,
+            max_value=12,
+            value=6,
             help="Περισσότερα projection years αυξάνουν το βάρος των assumptions στο DCF.",
         )
         valuation_simulations = st.slider(
@@ -963,6 +1480,7 @@ def main() -> None:
 
     settings = {
         "query": query.strip(),
+        "analysis_mode": analysis_mode,
         "history_years": history_years,
         "projection_years": projection_years,
         "valuation_simulations": valuation_simulations,
@@ -978,10 +1496,12 @@ def main() -> None:
         query=query,
         history_years=history_years,
         use_live_quote=use_live_quote,
+        analysis_mode=analysis_mode,
         force_refresh=force_refresh,
     )
     compute_profile = _compute_profile(valuation_simulations, forecast_simulations, history_years)
     settings_impact = _settings_impact_lines(
+        analysis_mode=analysis_mode,
         history_years=history_years,
         projection_years=projection_years,
         valuation_simulations=valuation_simulations,
@@ -996,28 +1516,34 @@ def main() -> None:
         st.markdown(
             """
             <div class="sidebar-note">
-                <strong>Research note:</strong><br/>
-                Το app προτιμά data-efficient μοντέλα που έχουν καλό trade-off ανάμεσα σε robustness,
-                explainability και local runtime σε base M2 laptop.
+                <strong>Desk note:</strong><br/>
+                Το setup είναι ρυθμισμένο ώστε να παραμένει γρήγορο, explainable και βιώσιμο στο free-data stack,
+                με έμφαση στο disciplined προσωπικό research και όχι στο αχρείαστα βαρύ compute.
             </div>
             """,
             unsafe_allow_html=True,
         )
-        run_clicked = st.button("Run Analysis", use_container_width=True, type="primary")
+        run_clicked = st.button(
+            "Run Trading Brief" if analysis_mode == "short_term" else "Run Investment Brief",
+            use_container_width=True,
+            type="primary",
+        )
 
-    render_intro(budget, compute_profile)
+    render_intro(budget, compute_profile, analysis_mode)
 
     if run_clicked:
         if not settings["query"]:
             st.error("Πρώτα γράψε ticker ή όνομα εταιρείας.")
         else:
             try:
-                with st.spinner("Loading FMP data, building valuation distribution, and fitting forecast models..."):
-                    dataset, valuation, forecast = run_analysis(**settings)
+                with st.spinner("Loading market data, selecting valuation framework, and fitting forecast models..."):
+                    dataset, valuation, forecast, mode_report = run_analysis(**settings)
                 st.session_state["analysis_payload"] = {
                     "dataset": dataset,
                     "valuation": valuation,
                     "forecast": forecast,
+                    "mode_report": mode_report,
+                    "analysis_mode": analysis_mode,
                 }
                 st.session_state["analysis_signature"] = current_signature
                 st.session_state["query_value"] = settings["query"]
@@ -1028,59 +1554,56 @@ def main() -> None:
 
     analysis_payload = st.session_state.get("analysis_payload")
     if not analysis_payload:
-        st.info("Ρύθμισε τα controls αριστερά, δες πρώτα πόσα calls θα γίνουν, και μετά πάτα Run Analysis.")
-        render_guide_tab(settings_impact, budget, compute_profile)
+        st.info(
+            "Ρύθμισε τα controls αριστερά, δες πρώτα πόσα calls θα γίνουν, και μετά πάτα "
+            f"{'Run Trading Brief' if analysis_mode == 'short_term' else 'Run Investment Brief'}."
+        )
+        render_guide_tab(settings_impact, budget, compute_profile, analysis_mode)
         return
 
     dataset = analysis_payload["dataset"]
     valuation = analysis_payload["valuation"]
     forecast = analysis_payload["forecast"]
+    mode_report = analysis_payload.get("mode_report", {})
+    analysis_mode = analysis_payload.get("analysis_mode", analysis_mode)
     stored_signature = st.session_state.get("analysis_signature")
     valuation_available = bool(valuation.get("available"))
     forecast_available = bool(forecast.get("available"))
 
     if stored_signature != current_signature:
-        st.warning("Τα αποτελέσματα που βλέπεις είναι από τα τελευταία submitted settings. Αν άλλαξες sliders, πάτα ξανά Run Analysis.")
+        st.warning(
+            "Τα αποτελέσματα που βλέπεις είναι από τα τελευταία submitted settings. "
+            f"Αν άλλαξες sliders, πάτα ξανά {'Run Trading Brief' if analysis_mode == 'short_term' else 'Run Investment Brief'}."
+        )
 
-    top_columns = st.columns(8)
-    price_metric_label = "Live Quote" if dataset.raw_info.get("live_quote_used") else "Latest Close"
-    top_columns[0].metric(price_metric_label, format_currency(dataset.current_price, dataset.currency))
-    top_columns[1].metric(
-        "Primary Value",
-        format_currency(valuation["percentiles"]["p50"], dataset.currency) if valuation_available else "N/A",
+    render_section_intro(
+        "Executive Summary",
+        "Αυτό είναι το πιο σύντομο και αναγνώσιμο snapshot του run. Κάθε γραμμή λέει όχι μόνο τι αριθμό πήραμε, αλλά και τι σημαίνει πρακτικά για την ανάλυση.",
     )
-    top_columns[2].metric(
-        "Margin of Safety",
-        format_percent(valuation["margin_of_safety"]) if valuation_available else "N/A",
+    st.dataframe(
+        _summary_table(dataset, valuation, forecast, mode_report, analysis_mode),
+        use_container_width=True,
+        hide_index=True,
     )
-    top_columns[3].metric(
-        "P(Undervalued)",
-        format_percent(valuation["probability_undervalued"]) if valuation_available else "N/A",
-    )
-    top_columns[4].metric(
-        "Valuation Confidence",
-        valuation["confidence"]["label"] if valuation_available else "N/A",
-        delta=f"{valuation['confidence']['score']}/100" if valuation_available else None,
-    )
-    top_columns[5].metric(
-        "Forecast Quality",
-        forecast["calibration"]["label"] if forecast_available else "N/A",
-        delta=f"{forecast['calibration']['score']}/100" if forecast_available else None,
-    )
-    top_columns[6].metric(
-        "Current Regime",
-        forecast["current_regime"] if forecast_available else "N/A",
-        delta=format_percent(forecast["current_regime_probability"]) if forecast_available else None,
-    )
-    top_columns[7].metric("Coverage", dataset.raw_info.get("coverage_label", "N/A"))
 
-    verdict_label = valuation["verdict"] if valuation_available else "Forecast Only"
-    verdict_class = "status-pill-good" if verdict_label == "Undervalued" else "status-pill-warn" if verdict_label == "Overvalued" else "status-pill-neutral"
+    if analysis_mode == "short_term":
+        verdict_label = mode_report.get("action", "Short-Term")
+        verdict_class = (
+            "status-pill-good"
+            if verdict_label == "Actionable"
+            else "status-pill-warn"
+            if verdict_label == "No-Trade"
+            else "status-pill-neutral"
+        )
+    else:
+        verdict_label = valuation["verdict"] if valuation_available else "Long-Term Review"
+        verdict_class = "status-pill-good" if verdict_label == "Undervalued" else "status-pill-warn" if verdict_label == "Overvalued" else "status-pill-neutral"
     st.markdown(
         f"""
         <span class="{verdict_class}">{verdict_label}</span>
         <span class="summary-chip">{dataset.symbol}</span>
         <span class="summary-chip">{dataset.sector}</span>
+        <span class="summary-chip">{'Short Term' if analysis_mode == 'short_term' else 'Long Term'}</span>
         <span class="summary-chip">{dataset.raw_info.get("coverage_label", "Coverage N/A")}</span>
         <span class="summary-chip">{dataset.raw_info.get("price_provider", "Provider N/A")} price feed</span>
         {f'<span class="summary-chip">Proxy via {dataset.raw_info.get("history_proxy_symbol")}</span>' if dataset.raw_info.get("history_mode") == "proxy" else ''}
@@ -1092,9 +1615,23 @@ def main() -> None:
     )
 
     st.subheader(dataset.company_name)
-    if valuation_available:
+    if analysis_mode == "short_term" and mode_report.get("available"):
+        st.write(
+            f"Το short-term decision layer βγάζει `{mode_report.get('setup', 'N/A')}` setup με action "
+            f"`{mode_report.get('action', 'N/A')}` και καλύτερο horizon το `{mode_report.get('best_horizon', 'N/A')}`."
+        )
+    elif valuation_available:
         st.write(valuation["verdict_reason"])
         st.caption(valuation.get("valuation_stack_note", ""))
+        if valuation.get("market_implied"):
+            market_implied = valuation["market_implied"]
+            upper_text = " και ξεπερνά το ανώτατο debug range του μοντέλου" if market_implied.get("upper_bound_hit") else ""
+            st.info(
+                f"Reverse DCF: για να δικαιολογηθεί η τρέχουσα τιμή, η αγορά χρειάζεται περίπου "
+                f"{format_percent(market_implied['required_initial_growth'])} stage-1 FCF growth "
+                f"σε horizon {market_implied['projection_years']} ετών{upper_text}. "
+                f"{market_implied['note']}"
+            )
     else:
         st.warning(valuation.get("error", "Δεν βγήκε valuation για αυτό το ticker με τα διαθέσιμα free fundamentals."))
     if dataset.description:
@@ -1109,45 +1646,70 @@ def main() -> None:
             f"Δεν βρέθηκε usable direct ή proxy history για το {dataset.symbol}. "
             "Το app συνεχίζει με current-price anchor και fundamentals όπου υπάρχουν, αλλά όχι με κανονικό forecast."
         )
+    risk_free_date = dataset.raw_info.get("risk_free_rate_date")
+    risk_free_suffix = f" as of {risk_free_date}" if risk_free_date else ""
+    risk_free_text = (
+        f"{format_percent(dataset.risk_free_rate)} ({dataset.raw_info.get('risk_free_rate_source', 'N/A')}"
+        f"{risk_free_suffix})"
+    )
     st.caption(
         f"Price basis: {dataset.raw_info.get('price_basis', 'N/A')} | "
         f"Coverage: {dataset.raw_info.get('coverage_note', 'N/A')} | "
+        f"Risk-free: {risk_free_text} | "
         f"Actual fresh calls: {dataset.raw_info.get('actual_network_calls', 'N/A')} | "
         f"Cache hints: {', '.join(dataset.raw_info.get('cache_messages', [])) or 'Fresh API responses'}"
     )
 
-    tabs = st.tabs(["Overview", "Valuation", "Forecast", "Reliability", "Guide"])
+    tabs = st.tabs(
+        ["Trading Brief", "Signal Desk", "Forecast Desk", "Reliability", "Method"]
+        if analysis_mode == "short_term"
+        else ["Investment Brief", "Valuation Desk", "Forecast Desk", "Reliability", "Method"]
+    )
 
     with tabs[0]:
-        st.markdown("### Snapshot")
-        overview_left, overview_right = st.columns([1.35, 1.0])
-        with overview_left:
-            if forecast_available:
-                st.plotly_chart(make_price_forecast_chart(dataset.price_history, forecast), use_container_width=True)
-            else:
-                st.warning(forecast.get("error", "Forecast unavailable."))
-        with overview_right:
-            if valuation_available:
-                st.plotly_chart(
-                    make_valuation_distribution_chart(valuation, dataset.current_price),
-                    use_container_width=True,
-                )
-            else:
-                st.info("Το valuation panel θα εμφανιστεί μόνο όταν υπάρχουν αρκετά SEC fundamentals για αυτό το ticker.")
+        st.markdown("### Trading Brief" if analysis_mode == "short_term" else "### Investment Brief")
+        render_section_intro(
+            "What This Section Shows",
+            "Το short-term briefing συνδυάζει trade setup, probability map, event risk και no-trade discipline."
+            if analysis_mode == "short_term"
+            else "Το investment briefing συνδυάζει intrinsic value, long-term stance και το probabilistic market backdrop ώστε να δεις αν η μετοχή φαίνεται ελκυστική, απαιτητική ή απλώς αβέβαιη.",
+        )
+        if analysis_mode == "short_term":
+            render_short_term_report(mode_report, dataset.currency)
+        else:
+            render_long_term_report(mode_report, dataset.currency)
 
-        st.markdown("### Short-Term Forecast")
+        if forecast_available:
+            st.plotly_chart(make_price_forecast_chart(dataset.price_history, forecast), use_container_width=True)
+            st.caption("Το fan chart δείχνει πιθανές διαδρομές τιμής. Η median γραμμή είναι το κέντρο της κατανομής και οι ζώνες γύρω της δείχνουν uncertainty και tail risk.")
+        else:
+            st.warning(forecast.get("error", "Forecast unavailable."))
+        if valuation_available:
+            st.plotly_chart(
+                make_valuation_distribution_chart(valuation, dataset.current_price),
+                use_container_width=True,
+            )
+            st.caption("Η valuation distribution δείχνει πολλά πιθανά fair values. Η μπλε γραμμή είναι το median intrinsic estimate και η κόκκινη η αγορά.")
+        elif analysis_mode == "long_term":
+            st.info("Το valuation panel θα εμφανιστεί μόνο όταν υπάρχουν αρκετά SEC fundamentals για αυτό το ticker.")
+
+        st.markdown("### Short-Horizon Outlook" if analysis_mode == "short_term" else "### Market Backdrop")
         if forecast_available:
             render_horizon_cards(forecast["horizon_summary"], dataset.currency)
         else:
             st.warning(forecast.get("error", "Forecast unavailable."))
 
-        summary_left, summary_right = st.columns(2)
-        with summary_left:
-            if forecast_available:
-                render_takeaways("Model Takeaways", forecast.get("takeaways", []))
-            else:
-                st.info("Μόλις βγει forecast, εδώ θα εμφανιστούν τα βασικά takeaways του μοντέλου.")
-        with summary_right:
+        if forecast_available:
+            render_takeaways("Desk Takeaways", forecast.get("takeaways", []))
+        else:
+            st.info("Μόλις βγει forecast, εδώ θα εμφανιστούν τα βασικά takeaways του μοντέλου.")
+        if analysis_mode == "short_term":
+            overview_lines = [
+                "Το short-term forecast λειτουργεί σαν probability map και όχι σαν υπόσχεση τιμής.",
+                "Το πιο χρήσιμο output δεν είναι πάντα buy signal. Πολύ συχνά είναι το `No-Trade` όταν το edge είναι μικρό ή το event risk πολύ κοντινό.",
+                "Όταν το καλύτερο horizon έχει καλό edge αλλά το calibration είναι αδύναμο, το σωστό διάβασμα είναι watchlist και όχι επιθετική είσοδος.",
+            ]
+        else:
             overview_lines = [
                 "Το valuation λειτουργεί ως anchor για τη θεωρητική αξία και όχι σαν μία μοναδική βεβαιότητα.",
                 "Το short-term forecast λειτουργεί ως probability map. Το κέντρο του fan chart είναι πιθανότερο path, όχι υπόσχεση.",
@@ -1157,89 +1719,148 @@ def main() -> None:
                 overview_lines.append(
                     f"Το secondary valuation model ({valuation['cross_check']['method_used']}) κάθεται περίπου {format_percent(valuation['cross_check']['gap_vs_primary'])} από το primary anchor."
                 )
-            render_takeaways("Research Posture", overview_lines)
+            if valuation_available and valuation.get("market_implied"):
+                market_implied = valuation["market_implied"]
+                overview_lines.append(
+                    f"Το reverse DCF δείχνει ότι η αγορά προεξοφλεί περίπου {format_percent(market_implied['required_initial_growth'])} αρχικό FCF growth σε horizon {market_implied['projection_years']} ετών."
+                )
+        render_takeaways("Research Posture", overview_lines)
 
     with tabs[1]:
-        st.markdown("### Valuation Anchor")
-        if not valuation_available:
+        st.markdown("### Signal Desk" if analysis_mode == "short_term" else "### Intrinsic Valuation")
+        if analysis_mode == "short_term":
+            render_section_intro(
+                "How To Read This Section",
+                "Το Signal Desk είναι το σημείο όπου το app μετατρέπει το forecast σε πρακτική απόφαση: edge, action, event risk και no-trade discipline.",
+            )
+            render_short_term_report(mode_report, dataset.currency)
+            if valuation_available:
+                st.markdown("### Secondary Long-Term Context")
+                st.info("Παρότι το mode είναι short-term, αν υπήρχε usable valuation anchor το δείχνουμε μόνο ως background context και όχι ως κύριο trade trigger.")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            ("Valuation verdict", valuation["verdict"], "Το intrinsic stance, μόνο σαν background context."),
+                            ("Margin of safety", format_percent(valuation["margin_of_safety"]), "Πόσο premium ή discount βγαίνει η αγορά απέναντι στο fair-value anchor."),
+                            ("Valuation confidence", f"{valuation['confidence']['label']} ({valuation['confidence']['score']}/100)", "Πόσο πολύ αξίζει να βαρύνει το valuation μέσα σε ένα short-term setup."),
+                        ],
+                        columns=["Context item", "Value", "What It Means"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("Στο short-term mode δεν απαιτείται full SEC-backed intrinsic valuation για να βγει trading brief.")
+        elif not valuation_available:
             st.warning(valuation.get("error", "Δεν βγήκε fair value για αυτό το ticker με το free-mode fundamentals stack."))
             st.info("Το free valuation δουλεύει καλύτερα σε U.S. companies με καθαρά SEC filings και αρκετό historical companyfacts coverage.")
         else:
+            render_section_intro(
+                "How To Read This Section",
+                "Εδώ φαίνεται ποιο valuation framework διάλεξε το app, ποιες assumptions το κινούν, πού βγαίνει η αξία σε διαφορετικά σενάρια, και πόσο απαιτητικές είναι οι προσδοκίες που έχει ήδη ενσωματώσει η αγορά.",
+            )
+            render_long_term_report(mode_report, dataset.currency)
             st.markdown(
                 f"""
                 <span class="summary-chip">{valuation['method_used']}</span>
                 <span class="summary-chip">Confidence {valuation['confidence']['label']} ({valuation['confidence']['score']}/100)</span>
+                <span class="summary-chip">Framework {valuation.get('framework_selected', 'N/A')}</span>
                 {f'<span class="summary-chip">Cross-check: {valuation["cross_check"]["method_used"]}</span>' if valuation.get("cross_check") else ''}
                 """,
                 unsafe_allow_html=True,
             )
-            valuation_left, valuation_right = st.columns([1.0, 1.25])
-            with valuation_left:
-                st.plotly_chart(
-                    make_scenario_chart(valuation, dataset.currency, dataset.current_price),
-                    use_container_width=True,
-                )
-            with valuation_right:
-                st.plotly_chart(
-                    make_sensitivity_heatmap(valuation, dataset.currency),
-                    use_container_width=True,
-                )
+            st.info(valuation.get("framework_reason", ""))
+            st.plotly_chart(
+                make_scenario_chart(valuation, dataset.currency, dataset.current_price),
+                use_container_width=True,
+            )
+            st.caption("Το scenario chart δείχνει πού βγαίνει η αξία σε bear, base και bull assumptions. Αν η αγορά είναι ήδη πάνω από το bull case, το premium είναι πολύ απαιτητικό.")
 
-            lower_left, lower_right = st.columns([1.05, 1.0])
-            with lower_left:
-                st.plotly_chart(
-                    make_fundamental_trend_chart(valuation, dataset.currency),
-                    use_container_width=True,
-                )
-            with lower_right:
-                assumptions = valuation["assumptions"]
-                st.markdown("### Valuation Inputs")
+            st.plotly_chart(
+                make_sensitivity_heatmap(valuation, dataset.currency),
+                use_container_width=True,
+            )
+            st.caption("Το sensitivity heatmap δείχνει πόσο γρήγορα μετακινείται το fair value όταν αλλάξουν growth και WACC, δηλαδή οι δύο πιο κρίσιμες παράμετροι.")
+
+            st.plotly_chart(
+                make_fundamental_trend_chart(valuation, dataset.currency),
+                use_container_width=True,
+            )
+            st.caption("Το historical anchor chart βοηθά να δεις αν το valuation πατά σε σταθερή θεμελιώδη ιστορία ή σε απότομη πρόσφατη μεταβολή.")
+
+            st.markdown("### Valuation Inputs")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        (label, format_mixed_value(label, value, dataset.currency), _input_meaning(label))
+                        for label, value in valuation.get("input_rows", [])
+                    ],
+                    columns=["Input", "Value", "What It Means"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("### Market Ratios")
+            ratios = valuation["ratios"]
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("P/E", format_multiple(ratios["trailing_pe"]), _ratio_meaning("P/E")),
+                        ("PEG", format_multiple(ratios["peg_ratio"]), _ratio_meaning("PEG")),
+                        ("P/B", format_multiple(ratios["price_to_book"]), _ratio_meaning("P/B")),
+                        ("EV/EBITDA", format_multiple(ratios["enterprise_to_ebitda"]), _ratio_meaning("EV/EBITDA")),
+                        ("ROE", format_percent(ratios["return_on_equity"]), _ratio_meaning("ROE")),
+                        ("Profit margin", format_percent(ratios["profit_margin"]), _ratio_meaning("Profit margin")),
+                    ],
+                    columns=["Ratio", "Value", "What It Means"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if valuation.get("market_implied"):
+                market_implied = valuation["market_implied"]
+                st.markdown("### Market-Implied Expectations")
                 st.dataframe(
                     pd.DataFrame(
                         [
-                            (label, format_mixed_value(label, value, dataset.currency))
-                            for label, value in valuation.get("input_rows", [])
+                            ("Label", market_implied["label"], "Συνοπτική κρίση για το πόσο απαιτητικές είναι οι παραδοχές που ήδη πληρώνει η αγορά."),
+                            ("Required stage-1 growth", format_percent(market_implied["required_initial_growth"]), "Ο growth ρυθμός που χρειάζεται για να δικαιολογείται η σημερινή τιμή."),
+                            ("Horizon", f"{market_implied['projection_years']} years", "Για πόσα χρόνια περίπου πρέπει να στηριχθεί το βασικό growth phase."),
+                            ("Upper bound hit", "Yes" if market_implied["upper_bound_hit"] else "No", "Αν είναι Yes, η αγορά είναι ακόμη πιο επιθετική από το πάνω όριο του debug range."),
                         ],
-                        columns=["Input", "Value"],
+                        columns=["Metric", "Value", "What It Means"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.caption(market_implied["note"])
+
+            if valuation.get("cross_check"):
+                cross_check = valuation["cross_check"]
+                st.markdown("### Cross-Check")
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            ("Method", cross_check["method_used"], "Το δεύτερο valuation lens που χρησιμοποιήθηκε σαν έλεγχος λογικότητας."),
+                            ("Median intrinsic", format_currency(cross_check["median_intrinsic"], dataset.currency), "Η median fair-value εκτίμηση του secondary model."),
+                            ("Margin vs market", format_percent(cross_check["margin_vs_market"]), "Πόσο πάνω ή κάτω βγάζει τη μετοχή το secondary lens σε σχέση με την αγορά."),
+                            ("Gap vs primary", format_percent(cross_check["gap_vs_primary"]), "Πόσο κοντά ή μακριά είναι το secondary model από το κύριο valuation anchor."),
+                        ],
+                        columns=["Metric", "Value", "What It Means"],
                     ),
                     use_container_width=True,
                     hide_index=True,
                 )
 
-                st.markdown("### Market Ratios")
-                ratios = valuation["ratios"]
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            ("P/E", format_multiple(ratios["trailing_pe"])),
-                            ("PEG", format_multiple(ratios["peg_ratio"])),
-                            ("P/B", format_multiple(ratios["price_to_book"])),
-                            ("EV/EBITDA", format_multiple(ratios["enterprise_to_ebitda"])),
-                            ("ROE", format_percent(ratios["return_on_equity"])),
-                            ("Profit margin", format_percent(ratios["profit_margin"])),
-                        ],
-                        columns=["Ratio", "Value"],
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
+            if valuation.get("classification"):
+                classification = valuation["classification"]
+                class_lines = list(classification.get("reasons", []))
+                class_lines.append(
+                    "Data-rich case." if not classification.get("data_poor") else "Data-poor case, άρα το valuation range θέλει μεγαλύτερη προσοχή."
                 )
-
-                if valuation.get("cross_check"):
-                    cross_check = valuation["cross_check"]
-                    st.markdown("### Cross-Check")
-                    st.dataframe(
-                        pd.DataFrame(
-                            [
-                                ("Method", cross_check["method_used"]),
-                                ("Median intrinsic", format_currency(cross_check["median_intrinsic"], dataset.currency)),
-                                ("Margin vs market", format_percent(cross_check["margin_vs_market"])),
-                                ("Gap vs primary", format_percent(cross_check["gap_vs_primary"])),
-                            ],
-                            columns=["Metric", "Value"],
-                        ),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+                render_takeaways("Why This Framework Was Selected", class_lines)
 
             st.markdown("### Scenario Table")
             scenario_frame = pd.DataFrame(valuation["scenario_table"]).copy()
@@ -1259,37 +1880,40 @@ def main() -> None:
             st.caption(valuation["normalization_note"])
 
     with tabs[2]:
-        st.markdown("### Forecast Diagnostics")
+        st.markdown("### Probability Forecasting")
         if not forecast_available:
             st.warning(forecast.get("error", "Forecast unavailable."))
         else:
-            forecast_left, forecast_right = st.columns([1.0, 1.15])
-            with forecast_left:
-                st.plotly_chart(make_regime_chart(forecast), use_container_width=True)
-            with forecast_right:
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            ("Model", forecast["model_name"]),
-                            ("Current regime", forecast["current_regime"]),
-                            ("Current regime probability", format_percent(forecast["current_regime_probability"])),
-                            ("Forecast quality", f"{forecast['calibration']['label']} ({forecast['calibration']['score']}/100)"),
-                            ("Daily jump probability", format_percent(forecast["jump_process"]["jump_probability"])),
-                            ("Context drift bias", format_percent(forecast["context_bias"])),
-                            ("Opportunity score", f"{forecast['context_scores']['opportunity']:.2f}"),
-                            ("Stress score", f"{forecast['context_scores']['stress']:.2f}"),
-                            ("Geopolitical proxy score", f"{forecast['context_scores']['geopolitical']:.2f}"),
-                            ("Behavior score", f"{forecast['context_scores']['behavior']:.2f}"),
-                            ("AR(1) intercept", f"{forecast['mean_model']['intercept']:.5f}"),
-                            ("AR(1) phi", f"{forecast['mean_model']['phi']:.3f}"),
-                        ],
-                        columns=["Diagnostic", "Value"],
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                st.markdown("### Regime Transition Matrix")
-                st.dataframe(forecast["transition_matrix"].style.format("{:.1%}"), use_container_width=True)
+            render_section_intro(
+                "How To Read This Section",
+                "Το forecast engine δεν προσπαθεί να μαντέψει μία τιμή. Προσπαθεί να χαρτογραφήσει πιθανότητες, regimes, volatility, jump risk και market-context bias για το κοντινό μέλλον.",
+            )
+            st.plotly_chart(make_regime_chart(forecast), use_container_width=True)
+            st.caption("Το regime chart δείχνει πώς κατανέμεται η πιθανότητα ανάμεσα στα βασικά market states μέσα στον χρόνο.")
+
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("Model", forecast["model_name"], _forecast_metric_meaning("Model")),
+                        ("Current regime", forecast["current_regime"], _forecast_metric_meaning("Current regime")),
+                        ("Current regime probability", format_percent(forecast["current_regime_probability"]), _forecast_metric_meaning("Current regime probability")),
+                        ("Forecast quality", f"{forecast['calibration']['label']} ({forecast['calibration']['score']}/100)", _forecast_metric_meaning("Forecast quality")),
+                        ("Daily jump probability", format_percent(forecast["jump_process"]["jump_probability"]), _forecast_metric_meaning("Daily jump probability")),
+                        ("Context drift bias", format_percent(forecast["context_bias"]), _forecast_metric_meaning("Context drift bias")),
+                        ("Opportunity score", f"{forecast['context_scores']['opportunity']:.2f}", _forecast_metric_meaning("Opportunity score")),
+                        ("Stress score", f"{forecast['context_scores']['stress']:.2f}", _forecast_metric_meaning("Stress score")),
+                        ("Geopolitical proxy score", f"{forecast['context_scores']['geopolitical']:.2f}", _forecast_metric_meaning("Geopolitical proxy score")),
+                        ("Behavior score", f"{forecast['context_scores']['behavior']:.2f}", _forecast_metric_meaning("Behavior score")),
+                        ("AR(1) intercept", f"{forecast['mean_model']['intercept']:.5f}", _forecast_metric_meaning("AR(1) intercept")),
+                        ("AR(1) phi", f"{forecast['mean_model']['phi']:.3f}", _forecast_metric_meaning("AR(1) phi")),
+                    ],
+                    columns=["Diagnostic", "Value", "What It Means"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.markdown("### Regime Transition Matrix")
+            st.dataframe(forecast["transition_matrix"].style.format("{:.1%}"), use_container_width=True)
 
             regime_stats = pd.DataFrame(forecast["regime_stats"]).copy()
             regime_stats["mean_return"] = regime_stats["mean_return"].map(format_percent)
@@ -1307,120 +1931,120 @@ def main() -> None:
                 hide_index=True,
             )
 
-            context_left, context_right = st.columns([1.0, 1.0])
-            with context_left:
-                st.markdown("### Proxy Snapshot")
-                st.caption(forecast["proxy_methodology"])
-                st.caption(
-                    "Υψηλότερο `Geopolitical proxy score` συνήθως σημαίνει ότι το μοντέλο βλέπει πιο έντονο risk-off περιβάλλον, "
-                    "με περισσότερη πιθανότητα για volatility spikes και αμυντική συμπεριφορά τιμής."
-                )
-                if not forecast["feature_snapshot"].empty:
-                    st.dataframe(forecast["feature_snapshot"], use_container_width=True)
-                else:
-                    st.info("Δεν ήταν διαθέσιμα αρκετά proxy features για snapshot.")
-            with context_right:
-                st.markdown("### Context Drivers")
-                st.caption(
-                    f"Assets used: {', '.join(forecast['context_assets_used']) or 'none'} | "
-                    f"Macro signals: {', '.join(forecast.get('macro_context_used', [])) or 'none'}"
-                )
-                st.caption(
-                    "Αν ανέβει το `GPR`, ο χρυσός, το πετρέλαιο και το δολάριο μαζί, το μοντέλο το διαβάζει σαν "
-                    "πιθανή κλιμάκωση κρίσης ή πολεμικού stress. Αντίθετα, χαμηλότερο GPR και καλύτερο breadth "
-                    "δίνουν πιο risk-on bias."
-                )
-                if not forecast["context_driver_table"].empty:
-                    driver_table = forecast["context_driver_table"].copy()
-                    driver_table["beta"] = driver_table["beta"].map(lambda value: f"{value:.4f}")
-                    driver_table["current_z"] = driver_table["current_z"].map(lambda value: f"{value:.2f}")
-                    driver_table["drift_contribution"] = driver_table["drift_contribution"].map(format_percent)
-                    st.dataframe(driver_table, use_container_width=True, hide_index=True)
-                else:
-                    st.info("Δεν βγήκαν σταθεροί exogenous drivers από τα διαθέσιμα proxies.")
+            st.markdown("### Proxy Snapshot")
+            st.caption(forecast["proxy_methodology"])
+            st.caption(
+                "Υψηλότερο `Geopolitical proxy score` συνήθως σημαίνει ότι το μοντέλο βλέπει πιο έντονο risk-off περιβάλλον, "
+                "με περισσότερη πιθανότητα για volatility spikes και αμυντική συμπεριφορά τιμής."
+            )
+            if not forecast["feature_snapshot"].empty:
+                st.dataframe(forecast["feature_snapshot"], use_container_width=True)
+            else:
+                st.info("Δεν ήταν διαθέσιμα αρκετά proxy features για snapshot.")
+
+            st.markdown("### Context Drivers")
+            st.caption(
+                f"Assets used: {', '.join(forecast['context_assets_used']) or 'none'} | "
+                f"Macro signals: {', '.join(forecast.get('macro_context_used', [])) or 'none'}"
+            )
+            st.caption(
+                "Αν ανέβει το `GPR`, ο χρυσός, το πετρέλαιο και το δολάριο μαζί, το μοντέλο το διαβάζει σαν "
+                "πιθανή κλιμάκωση κρίσης ή πολεμικού stress. Αντίθετα, χαμηλότερο GPR και καλύτερο breadth "
+                "δίνουν πιο risk-on bias."
+            )
+            if not forecast["context_driver_table"].empty:
+                driver_table = forecast["context_driver_table"].copy()
+                driver_table["beta"] = driver_table["beta"].map(lambda value: f"{value:.4f}")
+                driver_table["current_z"] = driver_table["current_z"].map(lambda value: f"{value:.2f}")
+                driver_table["drift_contribution"] = driver_table["drift_contribution"].map(format_percent)
+                st.dataframe(driver_table, use_container_width=True, hide_index=True)
+            else:
+                st.info("Δεν βγήκαν σταθεροί exogenous drivers από τα διαθέσιμα proxies.")
 
     with tabs[3]:
-        st.markdown("### Reliability & Evidence")
-        reliability_left, reliability_right = st.columns([1.0, 1.05])
-        with reliability_left:
-            if valuation_available:
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            ("Primary valuation method", valuation["method_used"]),
-                            ("Confidence", f"{valuation['confidence']['label']} ({valuation['confidence']['score']}/100)"),
-                            ("Verdict", valuation["verdict"]),
-                            ("90% intrinsic range", format_currency(valuation["uncertainty"]["intrinsic_range_90"], dataset.currency)),
-                            ("Stack note", valuation.get("valuation_stack_note", "N/A")),
-                        ],
-                        columns=["Valuation evidence", "Value"],
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                if valuation["confidence"]["reasons"]:
-                    render_takeaways("Why The Valuation Confidence Looks Like This", valuation["confidence"]["reasons"])
-            else:
-                st.info("Δεν υπάρχουν αρκετά fundamentals για valuation reliability diagnostics σε αυτό το ticker.")
-
-        with reliability_right:
-            if forecast_available:
-                calibration = forecast["calibration"]
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            ("Forecast quality", f"{calibration['label']} ({calibration['score']}/100)"),
-                            ("Calibration sample", f"{calibration['sample_days']} days"),
-                            ("Sign accuracy", format_percent(calibration["sign_accuracy"])),
-                            ("90% interval coverage", format_percent(calibration["interval_90_coverage"])),
-                            ("Left-tail hit rate", format_percent(calibration["left_tail_hit_rate"])),
-                            ("Predicted daily vol", format_percent(calibration["predicted_daily_vol"])),
-                            ("Realized daily vol", format_percent(calibration["realized_daily_vol"])),
-                            ("Realized / predicted vol", f"{calibration['vol_ratio']:.2f}x" if calibration["vol_ratio"] is not None else "N/A"),
-                        ],
-                        columns=["Forecast evidence", "Value"],
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                st.caption(calibration["summary"])
-            else:
-                st.info("Δεν υπάρχουν forecast reliability diagnostics για αυτό το run.")
+        st.markdown("### Model Governance")
+        render_section_intro(
+            "Why This Section Matters",
+            "Εδώ το app σταματά να σου δίνει απλώς outputs και σου δείχνει πόσο αξίζει να τα εμπιστευτείς. Είναι το section που ξεχωρίζει καλή ανάλυση από ψευδαίσθηση ακρίβειας.",
+        )
+        if valuation_available:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("Primary valuation method", valuation["method_used"], "Το κύριο valuation framework που χρησιμοποιήθηκε."),
+                        ("Confidence", f"{valuation['confidence']['label']} ({valuation['confidence']['score']}/100)", "Η συνολική εμπιστοσύνη στο valuation output."),
+                        ("Data quality", f"{valuation['data_quality']['label']} ({valuation['data_quality']['score']}/100)", "Η ποιότητα του dataset πριν καν εφαρμοστεί το valuation model."),
+                        ("Verdict", valuation["verdict"], "Το τελικό intrinsic stance του valuation engine."),
+                        ("90% intrinsic range", format_currency(valuation["uncertainty"]["intrinsic_range_90"], dataset.currency), "Πόσο φαρδύ είναι το πιθανό fair-value band."),
+                        ("Stack note", valuation.get("valuation_stack_note", "N/A"), "Σύντομη περιγραφή του valuation stack."),
+                    ],
+                    columns=["Valuation evidence", "Value", "What It Means"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if valuation["confidence"]["reasons"]:
+                render_takeaways("Why The Valuation Confidence Looks Like This", valuation["confidence"]["reasons"])
+            if valuation.get("data_quality", {}).get("reasons"):
+                render_takeaways("Why The Data Quality Looks Like This", valuation["data_quality"]["reasons"])
+        else:
+            st.info("Δεν υπάρχουν αρκετά fundamentals για valuation reliability diagnostics σε αυτό το ticker.")
 
         if forecast_available:
-            evidence_left, evidence_right = st.columns([1.0, 1.0])
-            with evidence_left:
-                st.markdown("### Volatility Ensemble")
-                if not forecast["volatility_models"].empty:
-                    volatility_models = forecast["volatility_models"].copy()
-                    volatility_models["weight"] = volatility_models["weight"].map(format_percent)
-                    volatility_models["aic"] = volatility_models["aic"].map(lambda value: f"{value:.1f}" if pd.notna(value) else "N/A")
-                    volatility_models["bic"] = volatility_models["bic"].map(lambda value: f"{value:.1f}" if pd.notna(value) else "N/A")
-                    st.dataframe(volatility_models, use_container_width=True, hide_index=True)
-                else:
-                    st.info("Δεν ήταν διαθέσιμο volatility ensemble breakdown.")
-            with evidence_right:
-                st.markdown("### Data Coverage")
-                st.dataframe(
-                    pd.DataFrame(
-                        [
-                            ("Coverage label", dataset.raw_info.get("coverage_label", "N/A")),
-                            ("Coverage note", dataset.raw_info.get("coverage_note", "N/A")),
-                            ("Primary price provider", dataset.raw_info.get("price_provider", "N/A")),
-                            ("SEC fundamentals available", "Yes" if dataset.raw_info.get("sec_fundamentals_available") else "No"),
-                            ("Context assets used", ", ".join(forecast.get("context_assets_used", [])) or "none"),
-                            ("Macro context used", ", ".join(forecast.get("macro_context_used", [])) or "none"),
-                            ("Sector ETF proxy", dataset.raw_info.get("sector_etf") or "none"),
-                            ("Cache hints", ", ".join(dataset.raw_info.get("cache_messages", [])) or "Fresh API responses"),
-                        ],
-                        columns=["Coverage item", "Value"],
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+            calibration = forecast["calibration"]
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("Forecast quality", f"{calibration['label']} ({calibration['score']}/100)", "Η συνολική στατιστική ποιότητα του forecast engine."),
+                        ("Calibration sample", f"{calibration['sample_days']} days", "Πόσο πρόσφατο history χρησιμοποιήθηκε για calibration diagnostics."),
+                        ("Sign accuracy", format_percent(calibration["sign_accuracy"]), "Πόσο συχνά έπιανε σωστά την κατεύθυνση."),
+                        ("90% interval coverage", format_percent(calibration["interval_90_coverage"]), "Πόσο συχνά το realized αποτέλεσμα έμενε μέσα στο 90% band."),
+                        ("Left-tail hit rate", format_percent(calibration["left_tail_hit_rate"]), "Πόσο συχνά το realized return έσπαγε το αριστερό tail του band."),
+                        ("Predicted daily vol", format_percent(calibration["predicted_daily_vol"]), "Η volatility που περίμενε το μοντέλο."),
+                        ("Realized daily vol", format_percent(calibration["realized_daily_vol"]), "Η volatility που τελικά είδαμε."),
+                        ("Realized / predicted vol", f"{calibration['vol_ratio']:.2f}x" if calibration["vol_ratio"] is not None else "N/A", "Δείχνει αν το μοντέλο υποτίμησε ή υπερεκτίμησε τη μεταβλητότητα."),
+                    ],
+                    columns=["Forecast evidence", "Value", "What It Means"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption(calibration["summary"])
+        else:
+            st.info("Δεν υπάρχουν forecast reliability diagnostics για αυτό το run.")
+
+        if forecast_available:
+            st.markdown("### Volatility Ensemble")
+            if not forecast["volatility_models"].empty:
+                volatility_models = forecast["volatility_models"].copy()
+                volatility_models["weight"] = volatility_models["weight"].map(format_percent)
+                volatility_models["aic"] = volatility_models["aic"].map(lambda value: f"{value:.1f}" if pd.notna(value) else "N/A")
+                volatility_models["bic"] = volatility_models["bic"].map(lambda value: f"{value:.1f}" if pd.notna(value) else "N/A")
+                st.dataframe(volatility_models, use_container_width=True, hide_index=True)
+            else:
+                st.info("Δεν ήταν διαθέσιμο volatility ensemble breakdown.")
+
+            st.markdown("### Data Coverage")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        ("Coverage label", dataset.raw_info.get("coverage_label", "N/A"), "Γρήγορη ένδειξη σταθερότητας του free-data stack για το ticker."),
+                        ("Coverage note", dataset.raw_info.get("coverage_note", "N/A"), "Σύντομη ερμηνεία για το πού είναι δυνατή και πού όχι η κάλυψη."),
+                        ("Primary price provider", dataset.raw_info.get("price_provider", "N/A"), "Ο provider που τελικά έδωσε το usable price history."),
+                        ("SEC fundamentals available", "Yes" if dataset.raw_info.get("sec_fundamentals_available") else "No", "Αν υπάρχουν annual SEC fundamentals για valuation."),
+                        ("Context assets used", ", ".join(forecast.get("context_assets_used", [])) or "none", "Τα proxy assets που χρησιμοποιήθηκαν στο context model."),
+                        ("Macro context used", ", ".join(forecast.get("macro_context_used", [])) or "none", "Τα macro / geopolitical series που μπήκαν στο forecast bias layer."),
+                        ("Sector ETF proxy", dataset.raw_info.get("sector_etf") or "none", "Το ETF που χρησιμοποιήθηκε σαν sector-relative context proxy."),
+                        ("Cache hints", ", ".join(dataset.raw_info.get("cache_messages", [])) or "Fresh API responses", "Σου λέει ποια parts ήρθαν από cache και ποια όχι."),
+                    ],
+                    columns=["Coverage item", "Value", "What It Means"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with tabs[4]:
-        render_guide_tab(settings_impact, budget, compute_profile)
+        render_guide_tab(settings_impact, budget, compute_profile, analysis_mode)
 
 
 if __name__ == "__main__":

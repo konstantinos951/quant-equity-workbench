@@ -16,6 +16,7 @@ from services.gpr_client import GPRClient, GPRClientError
 from services.models import StockDataset
 from services.sec_client import SECClient, SECClientError
 from services.stooq_client import StooqClient, StooqClientError
+from services.treasury_client import TreasuryClient, TreasuryClientError
 from services.yfinance_client import YFinanceClient, YFinanceClientError
 
 load_dotenv()
@@ -25,14 +26,18 @@ class DataRetrievalError(RuntimeError):
     pass
 
 
-PROFILE_TTL = 3 * 24 * 60 * 60
-SEARCH_TTL = 30 * 24 * 60 * 60
+PROFILE_TTL = 14 * 24 * 60 * 60
+SEARCH_TTL = 60 * 24 * 60 * 60
 QUOTE_TTL = 15 * 60
-PRICE_TTL = 12 * 60 * 60
-STOOQ_PRICE_TTL = 12 * 60 * 60
+PRICE_TTL = 24 * 60 * 60
+CONTEXT_PRICE_TTL = 5 * 24 * 60 * 60
+STOOQ_PRICE_TTL = 24 * 60 * 60
 SEC_MAP_TTL = 30 * 24 * 60 * 60
 SEC_FACTS_TTL = 3 * 24 * 60 * 60
-GPR_TTL = 3 * 24 * 60 * 60
+GPR_TTL = 14 * 24 * 60 * 60
+TREASURY_TTL = 2 * 24 * 60 * 60
+SUPPLEMENTAL_TTL = 3 * 24 * 60 * 60
+EVENT_TTL = 24 * 60 * 60
 ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 US_EXCHANGES = {
     "NASDAQ",
@@ -100,6 +105,12 @@ SEC_CASHFLOW_CONCEPTS = {
     "Free Cash Flow": [
         ("us-gaap", "FreeCashFlow"),
     ],
+    "Depreciation And Amortization": [
+        ("us-gaap", "DepreciationDepletionAndAmortization"),
+        ("us-gaap", "Depreciation"),
+        ("us-gaap", "DepreciationAmortizationAndAccretionNet"),
+        ("us-gaap", "DepreciationAndAmortization"),
+    ],
 }
 SEC_BALANCE_CONCEPTS = {
     "Cash And Cash Equivalents": [
@@ -110,6 +121,12 @@ SEC_BALANCE_CONCEPTS = {
         ("us-gaap", "LongTermDebtCurrent"),
         ("us-gaap", "ShortTermBorrowings"),
         ("us-gaap", "ShortTermDebt"),
+    ],
+    "Current Assets": [
+        ("us-gaap", "AssetsCurrent"),
+    ],
+    "Current Liabilities": [
+        ("us-gaap", "LiabilitiesCurrent"),
     ],
     "Long Term Debt": [
         ("us-gaap", "LongTermDebtNoncurrent"),
@@ -134,6 +151,19 @@ def _to_float(value: Any) -> float | None:
         return float(str(value).replace(",", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _naive_timestamp(value: Any) -> pd.Timestamp | None:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    if getattr(parsed, "tzinfo", None) is not None:
+        parsed = parsed.tz_convert("UTC").tz_localize(None)
+    return parsed
+
+
+def _utc_today_naive() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
 
 
 def _secret_or_env(name: str, default: str = "") -> str:
@@ -177,6 +207,12 @@ def _stooq_client() -> StooqClient:
 def _yfinance_client() -> YFinanceClient:
     cache_dir = Path(__file__).resolve().parent.parent / ".cache" / "yfinance"
     return YFinanceClient(cache_dir=cache_dir)
+
+
+@lru_cache(maxsize=1)
+def _treasury_client() -> TreasuryClient:
+    cache_dir = Path(__file__).resolve().parent.parent / ".cache" / "treasury"
+    return TreasuryClient(cache_dir=cache_dir)
 
 
 def _normalize_symbol(query: str) -> str:
@@ -231,7 +267,7 @@ def _search_result_rank(query: str, item: dict[str, Any]) -> tuple[int, int, int
 
 
 def _history_params(symbol: str, history_years: int) -> dict[str, Any]:
-    end_date = pd.Timestamp.utcnow().normalize()
+    end_date = _utc_today_naive()
     start_date = end_date - pd.Timedelta(days=history_years * 370)
     return {
         "symbol": symbol,
@@ -250,6 +286,10 @@ def _fresh_sec_cache(cache_key: str, ttl_seconds: float) -> bool:
 
 def _fresh_gpr_cache(ttl_seconds: float) -> bool:
     return _gpr_client().cache.get("gpr_recent_daily", ttl_seconds=ttl_seconds) is not None
+
+
+def _fresh_treasury_cache(ttl_seconds: float) -> bool:
+    return _treasury_client().cache.get("treasury_us_10y_latest", ttl_seconds=ttl_seconds) is not None
 
 
 def _fresh_stooq_cache(symbol: str, ttl_seconds: float) -> bool:
@@ -274,6 +314,18 @@ def _fetch_fmp_record(path: str, ttl_seconds: float, force_refresh: bool, **para
         raise DataRetrievalError(str(exc)) from exc
 
 
+def _fetch_optional_fmp_record(path: str, ttl_seconds: float, force_refresh: bool, **params: Any) -> tuple[CacheRecord | None, str | None]:
+    try:
+        return _fetch_fmp_record(
+            path=path,
+            ttl_seconds=ttl_seconds,
+            force_refresh=force_refresh,
+            **params,
+        ), None
+    except DataRetrievalError as exc:
+        return None, str(exc)
+
+
 def _fetch_sec_ticker_map(force_refresh: bool) -> CacheRecord:
     try:
         return _sec_client().get_company_tickers(ttl_seconds=SEC_MAP_TTL, force_refresh=force_refresh)
@@ -295,23 +347,33 @@ def _fetch_gpr_daily(force_refresh: bool) -> CacheRecord:
         raise DataRetrievalError(str(exc)) from exc
 
 
-def _fetch_stooq_history(symbol: str, force_refresh: bool) -> CacheRecord:
+def _fetch_treasury_us_10y(force_refresh: bool) -> CacheRecord:
+    try:
+        return _treasury_client().get_latest_us_10y_rate(
+            ttl_seconds=TREASURY_TTL,
+            force_refresh=force_refresh,
+        )
+    except TreasuryClientError as exc:
+        raise DataRetrievalError(str(exc)) from exc
+
+
+def _fetch_stooq_history(symbol: str, force_refresh: bool, ttl_seconds: float = STOOQ_PRICE_TTL) -> CacheRecord:
     try:
         return _stooq_client().get_daily_history(
             symbol=symbol,
-            ttl_seconds=STOOQ_PRICE_TTL,
+            ttl_seconds=ttl_seconds,
             force_refresh=force_refresh,
         )
     except StooqClientError as exc:
         raise DataRetrievalError(str(exc)) from exc
 
 
-def _fetch_yfinance_history(symbol: str, history_years: int, force_refresh: bool) -> CacheRecord:
+def _fetch_yfinance_history(symbol: str, history_years: int, force_refresh: bool, ttl_seconds: float = PRICE_TTL) -> CacheRecord:
     try:
         return _yfinance_client().get_daily_history(
             symbol=symbol,
             history_years=history_years,
-            ttl_seconds=PRICE_TTL,
+            ttl_seconds=ttl_seconds,
             force_refresh=force_refresh,
         )
     except YFinanceClientError as exc:
@@ -322,6 +384,7 @@ def _planned_requests(
     symbol: str,
     history_years: int,
     use_live_quote: bool,
+    analysis_mode: str,
     sector: str | None = None,
 ) -> list[dict[str, Any]]:
     requests_to_make = [
@@ -333,10 +396,71 @@ def _planned_requests(
             "ttl": PRICE_TTL,
             "params": _history_params(symbol, history_years),
         },
-        {"provider": "SEC", "label": "SEC ticker map", "cache_key": "company_tickers", "ttl": SEC_MAP_TTL},
-        {"provider": "SEC", "label": "SEC companyfacts", "cache_key": f"companyfacts:{symbol}", "ttl": SEC_FACTS_TTL},
         {"provider": "GPR", "label": "Daily geopolitical risk index", "cache_key": "gpr_recent_daily", "ttl": GPR_TTL},
+        {"provider": "Treasury", "label": "U.S. 10Y Treasury rate", "cache_key": "treasury_us_10y_latest", "ttl": TREASURY_TTL},
     ]
+
+    if analysis_mode == "long_term":
+        requests_to_make.extend(
+            [
+                {"provider": "SEC", "label": "SEC ticker map", "cache_key": "company_tickers", "ttl": SEC_MAP_TTL},
+                {"provider": "SEC", "label": "SEC companyfacts", "cache_key": f"companyfacts:{symbol}", "ttl": SEC_FACTS_TTL},
+                {
+                    "provider": "FMP",
+                    "label": "TTM key metrics",
+                    "path": "key-metrics-ttm",
+                    "ttl": SUPPLEMENTAL_TTL,
+                    "params": {"symbol": symbol},
+                },
+                {
+                    "provider": "FMP",
+                    "label": "TTM ratios",
+                    "path": "ratios-ttm",
+                    "ttl": SUPPLEMENTAL_TTL,
+                    "params": {"symbol": symbol},
+                },
+                {
+                    "provider": "FMP",
+                    "label": "Analyst estimates",
+                    "path": "financial-estimates",
+                    "ttl": SUPPLEMENTAL_TTL,
+                    "params": {"symbol": symbol, "period": "annual", "page": 0, "limit": 6},
+                },
+                {
+                    "provider": "FMP",
+                    "label": "Owner earnings",
+                    "path": "owner-earnings",
+                    "ttl": SUPPLEMENTAL_TTL,
+                    "params": {"symbol": symbol},
+                },
+                {
+                    "provider": "FMP",
+                    "label": "Price-target summary",
+                    "path": "price-target-summary",
+                    "ttl": SUPPLEMENTAL_TTL,
+                    "params": {"symbol": symbol},
+                },
+            ]
+        )
+    else:
+        requests_to_make.extend(
+            [
+                {
+                    "provider": "FMP",
+                    "label": "Earnings event summary",
+                    "path": "earnings",
+                    "ttl": EVENT_TTL,
+                    "params": {"symbol": symbol},
+                },
+                {
+                    "provider": "FMP",
+                    "label": "Price-target summary",
+                    "path": "price-target-summary",
+                    "ttl": SUPPLEMENTAL_TTL,
+                    "params": {"symbol": symbol},
+                },
+            ]
+        )
 
     for context_symbol, label in BASE_CONTEXT_SYMBOLS.items():
         requests_to_make.append(
@@ -344,7 +468,7 @@ def _planned_requests(
                 "provider": "FMP",
                 "label": f"Context: {label}",
                 "path": "historical-price-eod/light",
-                "ttl": PRICE_TTL,
+                "ttl": CONTEXT_PRICE_TTL,
                 "params": _history_params(context_symbol, history_years),
             }
         )
@@ -356,7 +480,7 @@ def _planned_requests(
                 "provider": "FMP",
                 "label": f"Context: sector ETF ({sector_etf})",
                 "path": "historical-price-eod/light",
-                "ttl": PRICE_TTL,
+                "ttl": CONTEXT_PRICE_TTL,
                 "params": _history_params(sector_etf, history_years),
             }
         )
@@ -372,6 +496,7 @@ def estimate_analysis_budget(
     query: str,
     history_years: int,
     use_live_quote: bool,
+    analysis_mode: str = "short_term",
     force_refresh: bool = False,
 ) -> dict[str, Any]:
     query = query.strip()
@@ -420,7 +545,7 @@ def estimate_analysis_budget(
     if symbol_hint:
         cached_cik = _resolve_cik_from_cached_map(symbol_hint)
         estimated_calls = fixed_calls
-        for item in _planned_requests(symbol_hint, history_years, use_live_quote, sector=sector_hint):
+        for item in _planned_requests(symbol_hint, history_years, use_live_quote, analysis_mode=analysis_mode, sector=sector_hint):
             if item["provider"] == "FMP":
                 cached = (not force_refresh) and _fresh_fmp_cache(item["path"], item["ttl"], **item["params"])
             else:
@@ -429,6 +554,8 @@ def estimate_analysis_budget(
                     if sec_cache_key.startswith("companyfacts:") and cached_cik:
                         sec_cache_key = f"companyfacts:{cached_cik}"
                     cached = (not force_refresh) and _fresh_sec_cache(sec_cache_key, item["ttl"])
+                elif item["provider"] == "Treasury":
+                    cached = (not force_refresh) and _fresh_treasury_cache(item["ttl"])
                 else:
                     cached = (not force_refresh) and _fresh_gpr_cache(item["ttl"])
             will_call = force_refresh or not cached
@@ -447,10 +574,14 @@ def estimate_analysis_budget(
             "range": (estimated_calls, estimated_calls),
             "symbol_hint": symbol_hint,
             "breakdown": breakdown,
-            "note": "Ο αριθμός περιλαμβάνει FMP free requests και SEC fetches. Σε δύσκολα symbols μπορεί να γίνει και fallback history request από Yahoo ή Stooq.",
+            "note": (
+                "Ο αριθμός περιλαμβάνει FMP free requests και, στο long-term mode, SEC fetches. "
+                "Τα shared market-context requests cache-άρονται για αρκετές ημέρες, οπότε σε προσωπική χρήση "
+                "η πραγματική καθημερινή κατανάλωση πέφτει αισθητά μετά τα πρώτα runs."
+            ),
         }
 
-    upper = fixed_calls + 11 + (1 if use_live_quote else 0)
+    upper = fixed_calls + (13 if analysis_mode == "short_term" else 18) + (1 if use_live_quote else 0)
     return {
         "label": f"{fixed_calls}-{upper}",
         "exact": False,
@@ -458,7 +589,12 @@ def estimate_analysis_budget(
         "range": (fixed_calls, upper),
         "symbol_hint": None,
         "breakdown": breakdown,
-        "note": "Για ακριβέστερο estimate βάλε ticker. Το free-mode χρησιμοποιεί FMP + SEC και, όταν χρειάζεται, fallback price history από Yahoo ή Stooq.",
+        "note": (
+            "Για ακριβέστερο estimate βάλε ticker. Στο short-term mode το app δουλεύει κυρίως με FMP free, "
+            "prices, context proxies και event overlays. Στο long-term mode προσπαθεί να προσθέσει SEC "
+            "fundamentals και extra FMP lenses. Τα context datasets κρατιούνται στο cache ώστε η καθημερινή "
+            "χρήση να μένει πιο οικονομική."
+        ),
     }
 
 
@@ -491,6 +627,7 @@ def _fetch_price_history(
     symbol: str,
     history_years: int,
     force_refresh: bool,
+    ttl_seconds: float = PRICE_TTL,
     allow_provider_fallbacks: bool = True,
 ) -> tuple[pd.DataFrame, CacheRecord, str]:
     history_record: CacheRecord | None = None
@@ -500,7 +637,7 @@ def _fetch_price_history(
         try:
             history_record = _fetch_fmp_record(
                 path=path,
-                ttl_seconds=PRICE_TTL,
+                ttl_seconds=ttl_seconds,
                 force_refresh=force_refresh,
                 **_history_params(symbol, history_years),
             )
@@ -514,6 +651,7 @@ def _fetch_price_history(
                 symbol=symbol,
                 history_years=history_years,
                 force_refresh=force_refresh,
+                ttl_seconds=ttl_seconds,
             )
             provider_used = "Yahoo"
         except DataRetrievalError as exc:
@@ -521,7 +659,7 @@ def _fetch_price_history(
 
     if history_record is None and allow_provider_fallbacks:
         try:
-            history_record = _fetch_stooq_history(symbol=symbol, force_refresh=force_refresh)
+            history_record = _fetch_stooq_history(symbol=symbol, force_refresh=force_refresh, ttl_seconds=ttl_seconds)
             provider_used = "Stooq"
         except DataRetrievalError as exc:
             provider_errors.append(f"Stooq: {exc}")
@@ -740,6 +878,185 @@ def _extract_latest_value(frame: pd.DataFrame, labels: tuple[str, ...]) -> float
     return 0.0
 
 
+def _extract_first_value(mapping: dict[str, Any], candidates: tuple[str, ...]) -> float | None:
+    for candidate in candidates:
+        if candidate not in mapping:
+            continue
+        value = _to_float(mapping.get(candidate))
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_first_text(mapping: dict[str, Any], candidates: tuple[str, ...]) -> str | None:
+    for candidate in candidates:
+        value = mapping.get(candidate)
+        if value in (None, "", "None"):
+            continue
+        return str(value)
+    return None
+
+
+def _parse_date_like(value: Any) -> pd.Timestamp | None:
+    if value in (None, "", "None"):
+        return None
+    parsed = _naive_timestamp(value)
+    if parsed is None:
+        return None
+    return parsed.normalize()
+
+
+def _summarize_earnings_payload(payload: Any) -> dict[str, Any]:
+    records = _records_from_payload(payload)
+    if not records:
+        return {}
+
+    today = _utc_today_naive()
+    normalized_rows: list[dict[str, Any]] = []
+    for record in records:
+        earnings_date = _parse_date_like(
+            _extract_first_text(
+                record,
+                (
+                    "date",
+                    "reportedDate",
+                    "earningsAnnouncement",
+                    "earningsDate",
+                    "fiscalDateEnding",
+                ),
+            )
+        )
+        if earnings_date is None:
+            continue
+        normalized_rows.append(
+            {
+                "date": earnings_date,
+                "time": _extract_first_text(record, ("time", "when", "releaseTime", "reportTime")) or "N/A",
+                "eps_estimate": _extract_first_value(record, ("epsEstimated", "estimatedEpsAvg", "epsEstimate")),
+                "revenue_estimate": _extract_first_value(
+                    record,
+                    ("revenueEstimated", "estimatedRevenueAvg", "revenueEstimate"),
+                ),
+                "eps_actual": _extract_first_value(record, ("eps", "actualEps", "reportedEPS")),
+                "revenue_actual": _extract_first_value(record, ("revenue", "actualRevenue", "reportedRevenue")),
+            }
+        )
+
+    if not normalized_rows:
+        return {}
+
+    upcoming = [item for item in normalized_rows if item["date"] >= today]
+    target = min(upcoming, key=lambda item: item["date"]) if upcoming else max(normalized_rows, key=lambda item: item["date"])
+    days_to_event = int((target["date"] - today).days)
+    return {
+        "event_date": target["date"].strftime("%Y-%m-%d"),
+        "days_to_event": days_to_event,
+        "time": target["time"],
+        "eps_estimate": target["eps_estimate"],
+        "revenue_estimate": target["revenue_estimate"],
+        "eps_actual": target["eps_actual"],
+        "revenue_actual": target["revenue_actual"],
+        "is_upcoming": days_to_event >= 0,
+        "event_window_active": abs(days_to_event) <= 7,
+    }
+
+
+def _summarize_estimates_payload(payload: Any) -> dict[str, Any]:
+    records = _records_from_payload(payload)
+    if not records:
+        return {}
+
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        period_date = _parse_date_like(
+            _extract_first_text(record, ("date", "calendarYear", "fiscalDateEnding", "period"))
+        )
+        rows.append(
+            {
+                "period_date": period_date,
+                "revenue_estimate": _extract_first_value(
+                    record,
+                    ("estimatedRevenueAvg", "revenueEstimated", "revenueEstimate", "revenueAvgEstimate"),
+                ),
+                "eps_estimate": _extract_first_value(
+                    record,
+                    ("estimatedEpsAvg", "epsEstimated", "epsEstimate", "epsAvgEstimate"),
+                ),
+                "analyst_count": _extract_first_value(
+                    record,
+                    ("numberAnalystEstimatedRevenue", "numberAnalystsEstimatedRevenue", "numberAnalystsEstimatedEPS"),
+                ),
+            }
+        )
+
+    rows = [row for row in rows if row["revenue_estimate"] is not None or row["eps_estimate"] is not None]
+    if not rows:
+        return {}
+
+    rows = sorted(rows, key=lambda row: row["period_date"] or pd.Timestamp.max)
+    today = _utc_today_naive()
+    future_rows = [row for row in rows if row["period_date"] is None or row["period_date"] >= today]
+    if not future_rows:
+        future_rows = rows[-2:]
+
+    first = future_rows[0]
+    second = future_rows[1] if len(future_rows) > 1 else None
+    revenue_growth = None
+    eps_growth = None
+    if second is not None and first["revenue_estimate"] and second["revenue_estimate"] and first["revenue_estimate"] > 0:
+        revenue_growth = float(np.clip(second["revenue_estimate"] / first["revenue_estimate"] - 1.0, -0.5, 1.0))
+    if second is not None and first["eps_estimate"] and second["eps_estimate"] and first["eps_estimate"] > 0:
+        eps_growth = float(np.clip(second["eps_estimate"] / first["eps_estimate"] - 1.0, -0.7, 1.5))
+
+    return {
+        "forward_revenue_estimate": first["revenue_estimate"],
+        "forward_eps_estimate": first["eps_estimate"],
+        "next_revenue_estimate": second["revenue_estimate"] if second else None,
+        "next_eps_estimate": second["eps_estimate"] if second else None,
+        "forward_revenue_growth": revenue_growth,
+        "forward_eps_growth": eps_growth,
+        "analyst_count": first["analyst_count"],
+    }
+
+
+def _coverage_profile(
+    profile: dict[str, Any],
+    cik: str | None,
+    annual_cashflow: pd.DataFrame,
+    price_provider: str,
+    analysis_mode: str,
+    supplemental_layers: int = 0,
+) -> tuple[str, str]:
+    score = 0
+    if price_provider in {"FMP", "Yahoo"}:
+        score += 2
+    elif price_provider == "Stooq":
+        score += 1
+    elif price_provider == "Proxy":
+        score += 1
+    if profile:
+        score += 1
+    if supplemental_layers > 0:
+        score += min(supplemental_layers, 2)
+
+    if analysis_mode == "long_term":
+        if cik:
+            score += 1
+        if not annual_cashflow.empty:
+            score += 2
+        if score >= 5:
+            return "High Coverage", "Το ticker έχει αρκετά καλή κάλυψη για valuation, cross-checks και forecast."
+        if score >= 3:
+            return "Medium Coverage", "Το ticker έχει usable κάλυψη, αλλά κάποια θεμελιώδη πεδία έρχονται με fallback ή χαμηλότερη πληρότητα."
+        return "Fragile Coverage", "Το long-term stack είναι αδύναμο για αυτό το ticker, άρα το αποτέλεσμα είναι περισσότερο exploratory."
+
+    if score >= 4:
+        return "High Coverage", "Το ticker έχει αρκετή κάλυψη για short-term setup, forecast και event-aware monitoring."
+    if score >= 2:
+        return "Medium Coverage", "Το ticker έχει usable short-term coverage, αλλά όχι ιδανικό data depth."
+    return "Fragile Coverage", "Το short-term αποτέλεσμα είναι usable μόνο σαν exploratory probability map."
+
+
 def _series_growth(series: pd.Series) -> float | None:
     cleaned = pd.to_numeric(series, errors="coerce").dropna()
     if len(cleaned) < 2:
@@ -799,6 +1116,7 @@ def _fetch_context_histories(
                 context_symbol,
                 history_years=history_years,
                 force_refresh=force_refresh,
+                ttl_seconds=CONTEXT_PRICE_TTL,
                 allow_provider_fallbacks=False,
             )
             context_histories[context_symbol] = history
@@ -837,26 +1155,6 @@ def _cache_message(label: str, record: CacheRecord | None) -> str | None:
     if record.source == "stale-cache":
         return f"{label}: stale cache fallback"
     return f"{label}: {record.source}"
-
-
-def _coverage_profile(profile: dict[str, Any], cik: str | None, annual_cashflow: pd.DataFrame, price_provider: str) -> tuple[str, str]:
-    score = 0
-    if price_provider in {"FMP", "Yahoo"}:
-        score += 2
-    elif price_provider == "Stooq":
-        score += 1
-    if profile:
-        score += 1
-    if cik:
-        score += 1
-    if not annual_cashflow.empty:
-        score += 2
-
-    if score >= 5:
-        return "High Coverage", "Το ticker έχει αρκετά καλή κάλυψη για full valuation + forecast."
-    if score >= 3:
-        return "Medium Coverage", "Το ticker έχει usable κάλυψη, αλλά κάποια πεδία μπορεί να έρχονται με fallback ή λιγότερη πληρότητα."
-    return "Fragile Coverage", "Το ticker στηρίζεται σε πιο αδύναμο free-data stack, άρα το αποτέλεσμα είναι περισσότερο exploratory."
 
 
 def _build_proxy_price_history(
@@ -912,6 +1210,7 @@ def fetch_stock_dataset(
     history_years: int = 5,
     force_refresh: bool = False,
     use_live_quote: bool = False,
+    analysis_mode: str = "short_term",
 ) -> StockDataset:
     symbol, search_record = resolve_symbol(query, force_refresh=force_refresh)
 
@@ -948,19 +1247,44 @@ def fetch_stock_dataset(
         force_refresh=force_refresh,
     )
     macro_context_series, gpr_record = _fetch_macro_context(force_refresh=force_refresh)
+    treasury_record = None
+    treasury_warning = None
+    risk_free_rate = 0.042
+    risk_free_date = None
+    try:
+        treasury_record = _fetch_treasury_us_10y(force_refresh=force_refresh)
+        treasury_payload = _first_record(_record_payload(treasury_record))
+        fetched_rate = _to_float(treasury_payload.get("rate"))
+        if fetched_rate is not None and fetched_rate > 0:
+            risk_free_rate = float(fetched_rate)
+        risk_free_date = str(treasury_payload.get("record_date") or "")
+    except DataRetrievalError as exc:
+        treasury_warning = str(exc)
 
-    sec_entry, sec_map_record = _resolve_sec_entry(symbol, force_refresh=force_refresh)
-    cik = str(sec_entry.get("cik_str", "")).zfill(10) if sec_entry and sec_entry.get("cik_str") else None
+    sec_warning = None
+    sec_entry = None
+    sec_map_record = None
+    cik = None
     sec_facts_record = None
     annual_income_stmt = pd.DataFrame()
     annual_balance_sheet = pd.DataFrame()
     annual_cashflow = pd.DataFrame()
 
-    if cik:
-        sec_facts_record = _fetch_sec_companyfacts(cik=cik, force_refresh=force_refresh)
-        annual_income_stmt, annual_balance_sheet, annual_cashflow = _build_sec_statement_frames(
-            _first_record(_record_payload(sec_facts_record))
-        )
+    if analysis_mode == "long_term":
+        try:
+            sec_entry, sec_map_record = _resolve_sec_entry(symbol, force_refresh=force_refresh)
+            cik = str(sec_entry.get("cik_str", "")).zfill(10) if sec_entry and sec_entry.get("cik_str") else None
+        except DataRetrievalError as exc:
+            sec_warning = str(exc)
+
+        if cik:
+            try:
+                sec_facts_record = _fetch_sec_companyfacts(cik=cik, force_refresh=force_refresh)
+                annual_income_stmt, annual_balance_sheet, annual_cashflow = _build_sec_statement_frames(
+                    _first_record(_record_payload(sec_facts_record))
+                )
+            except DataRetrievalError as exc:
+                sec_warning = str(exc)
 
     live_quote_record = None
     live_quote = None
@@ -1058,7 +1382,7 @@ def fetch_stock_dataset(
         except DataRetrievalError:
             price_history = pd.DataFrame(
                 [{"Close": float(current_price)}],
-                index=[pd.Timestamp.utcnow().normalize()],
+                index=[_utc_today_naive()],
             )
             history_mode = "minimal"
 
@@ -1077,6 +1401,83 @@ def fetch_stock_dataset(
     profit_margin = _safe_ratio(latest_net_income, latest_revenue) if latest_revenue > 0 else None
     peg_ratio = _safe_ratio(trailing_pe or 0.0, (earnings_growth or 0.0) * 100.0) if (trailing_pe and earnings_growth and earnings_growth > 0) else None
 
+    supplemental_records: dict[str, CacheRecord | None] = {}
+    supplemental_warnings: list[str] = []
+    supplemental_layers = 0
+
+    def _register_optional(name: str, path: str, ttl_seconds: float, **params: Any) -> None:
+        nonlocal supplemental_layers
+        record, warning = _fetch_optional_fmp_record(
+            path=path,
+            ttl_seconds=ttl_seconds,
+            force_refresh=force_refresh,
+            **params,
+        )
+        supplemental_records[name] = record
+        if warning:
+            supplemental_warnings.append(f"{name}: {warning}")
+        elif record is not None:
+            supplemental_layers += 1
+
+    if analysis_mode == "short_term":
+        _register_optional("earnings_summary", "earnings", EVENT_TTL, symbol=symbol)
+        _register_optional("price_target_summary", "price-target-summary", SUPPLEMENTAL_TTL, symbol=symbol)
+    else:
+        _register_optional("key_metrics_ttm", "key-metrics-ttm", SUPPLEMENTAL_TTL, symbol=symbol)
+        _register_optional("ratios_ttm", "ratios-ttm", SUPPLEMENTAL_TTL, symbol=symbol)
+        _register_optional(
+            "analyst_estimates",
+            "financial-estimates",
+            SUPPLEMENTAL_TTL,
+            symbol=symbol,
+            period="annual",
+            page=0,
+            limit=6,
+        )
+        _register_optional("owner_earnings", "owner-earnings", SUPPLEMENTAL_TTL, symbol=symbol)
+        _register_optional("price_target_summary", "price-target-summary", SUPPLEMENTAL_TTL, symbol=symbol)
+        _register_optional("earnings_summary", "earnings", EVENT_TTL, symbol=symbol)
+
+    ratios_record = supplemental_records.get("ratios_ttm")
+    key_metrics_record = supplemental_records.get("key_metrics_ttm")
+    estimates_record = supplemental_records.get("analyst_estimates")
+    owner_earnings_record = supplemental_records.get("owner_earnings")
+    earnings_record = supplemental_records.get("earnings_summary")
+    price_target_record = supplemental_records.get("price_target_summary")
+
+    ratios_ttm = _first_record(_record_payload(ratios_record)) if ratios_record is not None else {}
+    key_metrics_ttm = _first_record(_record_payload(key_metrics_record)) if key_metrics_record is not None else {}
+    analyst_estimates = _summarize_estimates_payload(_record_payload(estimates_record)) if estimates_record is not None else {}
+    owner_earnings_summary = _first_record(_record_payload(owner_earnings_record)) if owner_earnings_record is not None else {}
+    earnings_summary = _summarize_earnings_payload(_record_payload(earnings_record)) if earnings_record is not None else {}
+    price_target_summary = _first_record(_record_payload(price_target_record)) if price_target_record is not None else {}
+
+    if trailing_pe is None:
+        trailing_pe = _extract_first_value(
+            key_metrics_ttm,
+            ("peRatioTTM", "peRatio", "priceEarningsRatioTTM"),
+        ) or trailing_pe
+    if price_to_book is None:
+        price_to_book = _extract_first_value(
+            key_metrics_ttm,
+            ("pbRatioTTM", "pbRatio", "priceToBookRatioTTM", "priceToBookRatio"),
+        ) or price_to_book
+    if enterprise_to_ebitda is None:
+        enterprise_to_ebitda = _extract_first_value(
+            key_metrics_ttm,
+            ("enterpriseValueOverEBITDATTM", "enterpriseValueOverEBITDA", "evToEbitdaTTM"),
+        ) or enterprise_to_ebitda
+    if return_on_equity is None:
+        return_on_equity = _extract_first_value(
+            ratios_ttm,
+            ("returnOnEquityTTM", "returnOnEquity", "roeTTM"),
+        ) or return_on_equity
+    if profit_margin is None:
+        profit_margin = _extract_first_value(
+            ratios_ttm,
+            ("netProfitMarginTTM", "netProfitMargin", "profitMargin"),
+        ) or profit_margin
+
     cache_messages = []
     for label, record in (
         ("search", search_record),
@@ -1085,7 +1486,14 @@ def fetch_stock_dataset(
         ("sec ticker map", sec_map_record),
         ("sec companyfacts", sec_facts_record),
         ("daily gpr", gpr_record),
+        ("u.s. 10y treasury", treasury_record),
         ("live quote", live_quote_record),
+        ("ratios ttm", ratios_record),
+        ("key metrics ttm", key_metrics_record),
+        ("analyst estimates", estimates_record),
+        ("owner earnings", owner_earnings_record),
+        ("earnings summary", earnings_record),
+        ("price target summary", price_target_record),
     ):
         message = _cache_message(label, record)
         if message is not None:
@@ -1096,12 +1504,18 @@ def fetch_stock_dataset(
         if message is not None:
             cache_messages.append(message)
 
+    if treasury_warning:
+        cache_messages.append(f"treasury fallback rate: {treasury_warning}")
     if live_quote_warning:
         cache_messages.append(f"live quote unavailable: {live_quote_warning}")
     if profile_warning:
         cache_messages.append(f"profile unavailable: {profile_warning}")
     if history_warning:
         cache_messages.append(f"direct history unavailable: {history_warning}")
+    if sec_warning:
+        cache_messages.append(f"sec unavailable: {sec_warning}")
+    for warning in supplemental_warnings:
+        cache_messages.append(f"optional layer unavailable: {warning}")
     if history_proxy_symbol:
         cache_messages.append(f"proxy history mode: {history_proxy_symbol}")
     if history_mode == "minimal":
@@ -1109,7 +1523,23 @@ def fetch_stock_dataset(
 
     actual_network_calls = sum(
         1
-        for record in [search_record, profile_record, history_record, sec_map_record, sec_facts_record, gpr_record, live_quote_record, *context_records.values()]
+        for record in [
+            search_record,
+            profile_record,
+            history_record,
+            sec_map_record,
+            sec_facts_record,
+            gpr_record,
+            treasury_record,
+            live_quote_record,
+            ratios_record,
+            key_metrics_record,
+            estimates_record,
+            owner_earnings_record,
+            earnings_record,
+            price_target_record,
+            *context_records.values(),
+        ]
         if record is not None and record.source == "network"
     )
     coverage_label, coverage_note = _coverage_profile(
@@ -1117,6 +1547,8 @@ def fetch_stock_dataset(
         cik=cik,
         annual_cashflow=annual_cashflow,
         price_provider=price_provider,
+        analysis_mode=analysis_mode,
+        supplemental_layers=supplemental_layers,
     )
     if history_mode == "proxy":
         coverage_label = "Fragile Coverage"
@@ -1152,7 +1584,7 @@ def fetch_stock_dataset(
         return_on_equity=return_on_equity,
         cash_and_equivalents=float(cash_and_equivalents),
         total_debt=float(total_debt),
-        risk_free_rate=0.042,
+        risk_free_rate=float(risk_free_rate),
         price_history=price_history,
         context_price_history=context_histories,
         context_macro_series=macro_context_series,
@@ -1160,9 +1592,12 @@ def fetch_stock_dataset(
         annual_balance_sheet=annual_balance_sheet,
         annual_income_stmt=annual_income_stmt,
         raw_info={
-            "data_source": "FMP free + SEC companyfacts",
+            "data_source": "FMP free + SEC companyfacts" if analysis_mode == "long_term" else "FMP free + market-context free stack",
             "provider_code": "fmp-sec-free",
+            "analysis_mode": analysis_mode,
             "actual_network_calls": actual_network_calls,
+            "risk_free_rate_source": "U.S. Treasury 10Y" if treasury_record is not None else "Fallback default",
+            "risk_free_rate_date": risk_free_date,
             "price_basis": (
                 "live quote from FMP"
                 if live_quote is not None
@@ -1176,10 +1611,18 @@ def fetch_stock_dataset(
             "profile_available": bool(profile),
             "sec_cik": cik,
             "sec_fundamentals_available": bool(cik and not annual_cashflow.empty),
+            "sec_warning": sec_warning,
             "context_symbols": list(context_histories),
             "macro_context_symbols": list(macro_context_series),
             "sector_etf": sector_etf,
             "coverage_label": coverage_label,
             "coverage_note": coverage_note,
+            "earnings_summary": earnings_summary,
+            "analyst_estimates": analyst_estimates,
+            "ratios_ttm": ratios_ttm,
+            "key_metrics_ttm": key_metrics_ttm,
+            "owner_earnings_summary": owner_earnings_summary,
+            "price_target_summary": price_target_summary,
+            "supplemental_warnings": supplemental_warnings,
         },
     )

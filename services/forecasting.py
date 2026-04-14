@@ -678,11 +678,17 @@ def _simulate_price_paths(
 
 
 def _build_horizon_summary(paths: np.ndarray, current_price: float) -> list[dict[str, Any]]:
-    horizons = [(5, "1 Week"), (15, "3 Weeks"), (21, "1 Month")]
+    raw_horizons = [(1, "1 Day"), (5, "1 Week"), (10, "2 Weeks"), (21, "1 Month")]
+    max_available = paths.shape[1] - 1
+    horizons = [(days, label) for days, label in raw_horizons if days <= max_available]
     summaries: list[dict[str, Any]] = []
 
     for days, label in horizons:
         terminal_prices = paths[:, days]
+        path_slice = paths[:, : days + 1]
+        running_peaks = np.maximum.accumulate(path_slice, axis=1)
+        drawdowns = path_slice / np.maximum(running_peaks, 1e-8) - 1.0
+        max_drawdown = np.min(drawdowns, axis=1)
         summaries.append(
             {
                 "label": label,
@@ -697,6 +703,9 @@ def _build_horizon_summary(paths: np.ndarray, current_price: float) -> list[dict
                 "probability_down_5pct": float(np.mean(terminal_prices < current_price * 0.95)),
                 "probability_up_5pct": float(np.mean(terminal_prices > current_price * 1.05)),
                 "median_return": float(np.percentile(terminal_prices / current_price - 1.0, 50)),
+                "expected_max_drawdown": float(np.mean(max_drawdown)),
+                "p25_max_drawdown": float(np.percentile(max_drawdown, 25)),
+                "p75_max_drawdown": float(np.percentile(max_drawdown, 75)),
             }
         )
 
