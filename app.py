@@ -1991,6 +1991,82 @@ def main() -> None:
             st.info("Δεν υπάρχουν αρκετά fundamentals για valuation reliability diagnostics σε αυτό το ticker.")
 
         if forecast_available:
+            selection = forecast.get("drift_selection")
+            if selection is not None:
+                st.markdown("### Econometric Forecast Benchmarks")
+                st.write(f"Selected daily drift: **{selection['selected_model']}**")
+                st.caption(
+                    f"Validation: {selection['validation_days']} trading days. Separate holdout: "
+                    f"{selection['holdout_days']} days ({selection['holdout_start']} to {selection['holdout_end']}). "
+                    "Positive holdout MSE skill means lower error than the random walk; negative means worse. "
+                    "A zero-log-drift random walk has no directional prediction."
+                )
+                st.dataframe(selection["metrics"], use_container_width=True, hide_index=True)
+                capm = selection["fit"]["capm"]
+                if capm is not None:
+                    st.write(
+                        f"CAPM beta: {capm['beta']:.3f} | HAC standard error: {capm['beta_hac_se']:.3f} | "
+                        f"R²: {capm['r_squared']:.3f} | Aligned observations: {capm['observations']}"
+                    )
+                    st.caption("CAPM alpha is reported as a regression diagnostic and excluded from the equilibrium expected return.")
+                else:
+                    st.caption("CAPM unavailable: SPY needs at least 120 aligned daily returns with nonzero market variance.")
+                shares = selection["fit"]["agent_shares"]
+                st.caption(
+                    f"Experimental agent population: trend followers {shares[0]:.1%}, "
+                    f"mean reverters {shares[1]:.1%}, noise traders {shares[2]:.1%}. "
+                    "Shares describe a stylized simulation, not measured investors."
+                )
+                st.caption(selection["methodology"])
+                learning = selection.get("learning")
+                if learning is not None:
+                    st.markdown("### Online Agent Learning")
+                    st.write(
+                        f"Observed returns learned: **{learning['observations']}** | "
+                        f"Newly processed: **{learning['new_observations']}** | "
+                        f"Last observation: **{learning['last_observation']}**"
+                    )
+                    st.dataframe(learning['agents'], use_container_width=True, hide_index=True)
+                    st.caption(
+                        "Agents predict first, then update regression coefficients and ensemble weights when the actual "
+                        "return is observed. Lower normalized prediction loss earns greater weight; forgetting allows "
+                        "adaptation to changing markets. Agents share observed outcomes through the ensemble. "
+                        "Simulations use frozen learned parameters and never train the saved model. "
+                        f"Checkpoint: {learning['checkpoint_status']}. Repeated runs on unchanged history add no training."
+                    )
+                    if learning['warning']:
+                        st.warning(learning['warning'])
+                    st.caption(
+                        "Learning state is cached locally. A reset or redeployment may remove that cache; "
+                        "the model can rebuild it by replaying available price history. More observations can help "
+                        "or hurt performance—learning is not a guarantee of accuracy."
+                    )
+                evidence = selection.get('evidence')
+                if evidence is not None:
+                    verdict = 'supports a lower daily squared error' if evidence['positive_gain_supported'] else 'does not establish a lower daily squared error'
+                    st.write(f"Holdout evidence {verdict} than the random walk.")
+                    st.caption(
+                        f"Mean MSE gain: {evidence['mean_mse_gain']:.6g}; "
+                        f"HAC 95% interval [{evidence['hac_ci95_low']:.6g}, {evidence['hac_ci95_high']:.6g}]. "
+                        + evidence['note']
+                    )
+                risk_rows = [
+                    {'horizon': row['label'], '95% VaR loss': row['var_95_loss'],
+                     '95% expected shortfall loss': row['expected_shortfall_95_loss'],
+                     'probability upside': row['probability_upside'],
+                     'MC probability lower': row['probability_upside_mc_ci95_low'],
+                     'MC probability upper': row['probability_upside_mc_ci95_high']}
+                    for row in forecast['horizon_summary'] if 'var_95_loss' in row
+                ]
+                if risk_rows:
+                    st.markdown("### Simulated Tail Risk")
+                    st.dataframe(pd.DataFrame(risk_rows).style.format({key: '{:.1%}' for key in risk_rows[0] if key != 'horizon'}),
+                                 use_container_width=True, hide_index=True)
+                    st.caption(
+                        "VaR is the 95th percentile of simulated loss; expected shortfall is the mean loss in the worst 5% tail. "
+                        "The probability bounds measure Monte Carlo sampling error under this model, not uncertainty "
+                        "about the model or actual market outcomes."
+                    )
             calibration = forecast["calibration"]
             st.dataframe(
                 pd.DataFrame(
