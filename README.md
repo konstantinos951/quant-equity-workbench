@@ -240,3 +240,94 @@ git push
 - Οι γεωπολιτικοί κίνδυνοι δεν προβλέπονται απευθείας. Το app τους προσεγγίζει με proxy variables όπως oil, gold, dollar, rates και risk-off behavior
 - Όταν φορτώνει σωστά το `GPR` dataset, το app προσθέτει και άμεσο geopolitical risk signal πάνω από τα market proxies
 - Το app είναι για research / εκπαίδευση και όχι προσωπική επενδυτική συμβουλή
+
+## Forecast model comparison
+
+The forecast engine compares nine daily log-return drift models: a zero-drift
+random walk, historical drift, AR(1), regularized AR(5), CAPM, empirical Markov
+regimes, an adaptive-agent market, online learning agents, and dynamic ARX
+(regression using lagged stock and market returns). CAPM estimates beta from aligned SPY returns
+with HAC standard errors. Its expected return excludes fitted alpha, uses the
+historical market premium, and assumes the current risk-free rate throughout.
+CAPM is omitted when market history is insufficient; no extra API key is needed
+beyond the existing data stack.
+
+The agent market aggregates trend followers, mean reverters, and noise traders.
+Strategy shares adapt to past profitability. The mean-reverting anchor is an
+exponentially weighted geometric price average, not independently estimated
+intrinsic value. Noise enters through the shared stochastic return process.
+These populations are modeling assumptions, not measured investor positions.
+
+Each batch candidate is refitted at chronological one-day forecast origins using
+only earlier returns (up to 504 training observations). Online agents process the
+available history sequentially with forgetting, issuing each forecast before
+observing its target. The earlier validation block
+selects the drift model; a later separate holdout reports its error. Each block
+contains up to 63 trading days, depending on history length. A candidate must
+reduce validation MSE by at least 2% to replace the random walk. Positive holdout
+MSE skill indicates improvement against that benchmark; it is not guaranteed.
+The 2% rule is a heuristic, not a significance test.
+
+The selected drift drives Monte Carlo paths; hidden Markov regimes, GARCH/GJR,
+market-stress proxies, and jumps still shape their risk. Student-t and empirical
+innovations are sampled as a mixture to avoid shrinking variance through a
+weighted sum. Nonconverged hidden Markov and GARCH fits fall back to supported
+alternatives. The random-walk comparison evaluates drift, not a separate full
+random-walk volatility model.
+
+Reliability diagnostics now use the later one-day holdout with causal EWMA
+volatility and bands calibrated on previously observed standardized errors.
+These conformal-style bands adapt as outcomes arrive; serial dependence prevents
+claiming distribution-free coverage guarantees. A HAC confidence interval for
+holdout MSE improvement reports whether evidence supports a gain against the
+random walk. These diagnostics do **not** establish calibration of the full
+Monte Carlo distribution or the multi-day forecasts. Real-market evaluation,
+longer out-of-sample histories, and transaction costs are needed before claiming
+better trading performance.
+
+Run the offline numerical checks from the project directory:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+## Online learning and computational risk
+
+The learning population contains trend, mean-reversion, autoregressive, and
+market specialists plus a fixed random-walk expert. Each specialist learns
+regression coefficients with forgetting-factor recursive least squares and
+bounded residual updates. Discounted prediction errors determine ensemble
+weights, with a small weight floor so specialists can recover after a regime
+change. Agents share observed outcomes through the ensemble; generated forecasts
+are never treated as ground truth. This is supervised online machine learning,
+not an autonomous agent inventing or validating trading strategies.
+
+Learning occurs when analysis processes newly available **daily returns**. There
+is no background training service. An unchanged app run does not count as new
+training; the existing app cache may return an earlier report until refreshed.
+Repeated analyses or more Monte Carlo paths do not create new market evidence.
+Use the existing API refresh control when fresh history is needed.
+
+Versioned JSON checkpoints are stored per ticker under ignored `.cache/learning/`.
+An exact historical prefix allows incremental updates; unchanged data reuses the
+checkpoint without retraining. Revised data, a shifted history window, an older
+as-of cutoff, changed market observations, or incompatible checkpoints trigger a
+clean chronological replay. Historical comparisons use stored pre-target forecasts,
+never final coefficients trained on the holdout. Checkpoint writes are atomic;
+unavailable local storage falls back to in-memory learning with a UI warning.
+No secrets or credentials are stored in the learning checkpoints.
+
+Learned coefficients and ensemble weights are frozen during Monte Carlo
+simulation. Lagged signals evolve along each path, but simulated returns never
+update saved learning parameters. Unknown future market signals decay toward
+zero as a scenario assumption, not a forecast of market prices. The older
+adaptive-agent candidate remains a distinct behavioral scenario whose population
+shares can change inside simulations.
+
+The governance panel shows learning counts, agent weights/losses, holdout evidence,
+and simulated 95% Value at Risk and Expected Shortfall. Confidence bounds on the
+simulated upside probability describe finite Monte Carlo sampling error only;
+they exclude model uncertainty. Tail-risk estimates depend on the assumed model
+and exclude trading costs. A Streamlit restart/redeployment can remove local
+checkpoints; the model rebuilds from available history. No external model API,
+additional API key, new dependency, or paid training service is required.

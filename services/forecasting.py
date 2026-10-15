@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import os
 from typing import Any
 import warnings
@@ -18,6 +19,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE_DIR))
 from arch import arch_model
 
 from services.models import ForecastConfig, StockDataset
+from services.econometrics import fit_drift_selection, simulate_drift
 
 
 class ForecastModelError(RuntimeError):
@@ -75,6 +77,9 @@ def _fit_markov_model(returns: pd.Series, desired_regimes: int) -> dict[str, Any
                 warnings.simplefilter("ignore", EstimationWarning)
                 warnings.simplefilter("ignore", ConvergenceWarning)
                 result = model.fit(search_reps=20, em_iter=10, disp=False)
+
+            if not result.mle_retvals.get("converged", False) or not np.isfinite(result.llf):
+                raise ForecastModelError("Markov fit did not converge to a finite likelihood.")
 
             smoothed = result.smoothed_marginal_probabilities.copy()
             filtered = result.filtered_marginal_probabilities.copy()
@@ -189,6 +194,8 @@ def _fit_volatility_candidate(
         rescale=False,
     )
     result = model.fit(disp="off", show_warning=False)
+    if result.convergence_flag != 0:
+        raise ForecastModelError(f"{label} optimization did not converge.")
     forecast_method = "analytic" if asymmetry_order == 0 else "simulation"
     forecast_kwargs: dict[str, Any] = {"horizon": horizon, "method": forecast_method}
     if forecast_method == "simulation":
@@ -618,13 +625,17 @@ def _simulate_price_paths(
     context_model: dict[str, Any],
     context_scores: dict[str, float],
     simulations: int,
+    drift_selection: dict[str, Any] | None = None,
 ) -> np.ndarray:
     rng = np.random.default_rng(7)
+    agent_state: dict[str, np.ndarray] = {}
     horizon = len(base_sigma_path)
     states = rng.choice(len(current_probabilities), size=simulations, p=current_probabilities)
     paths = np.empty((simulations, horizon + 1), dtype=float)
     paths[:, 0] = current_price
     previous_returns = np.full(simulations, float(mean_model.get("recent_mean", np.mean(regime_means))))
+    if drift_selection is not None:
+        previous_returns.fill(drift_selection["fit"]["last_return"])
 
     scale = np.sqrt(degrees_of_freedom / (degrees_of_freedom - 2.0)) if degrees_of_freedom > 2 else 1.0
     unconditional_mean = float(np.mean(regime_means))
@@ -633,6 +644,8 @@ def _simulate_price_paths(
     bootstrap_pool = np.asarray(bootstrap_pool, dtype=float)
     if len(bootstrap_pool) == 0:
         bootstrap_pool = np.array([0.0])
+    bootstrap_std = float(np.std(bootstrap_pool))
+    bootstrap_pool = (bootstrap_pool - np.mean(bootstrap_pool)) / max(bootstrap_std, 1e-8)
 
     context_bias = float(context_model["current_bias"])
     stress_score = float(context_scores.get("stress", 0.0))
@@ -660,11 +673,17 @@ def _simulate_price_paths(
         recent_mean = mean_model.get("recent_mean", unconditional_mean)
         contextual_mu = context_bias * decay
         mu = 0.32 * regime_mu + 0.24 * ar_mu + 0.18 * unconditional_mean + 0.16 * recent_mean + 0.10 * contextual_mu
+        if drift_selection is not None:
+            mu = simulate_drift(
+                drift_selection, previous_returns,
+                np.log(paths[:, step - 1] / current_price), step - 1, agent_state,
+            )
         sigma = base_sigma_path[step - 1] * regime_vol_scales[states] * volatility_bias
 
         t_shocks = rng.standard_t(degrees_of_freedom, size=simulations) / scale
         empirical_shocks = rng.choice(bootstrap_pool, size=simulations, replace=True)
-        innovation = 0.62 * t_shocks + 0.38 * empirical_shocks
+        # A mixture preserves shock variance; a weighted sum shrinks it.
+        innovation = np.where(rng.random(simulations) < 0.62, t_shocks, empirical_shocks)
 
         jump_flags = rng.random(simulations) < jump_probability * jump_bias
         jump_draws = rng.choice(jump_pool, size=simulations, replace=True)
@@ -689,6 +708,14 @@ def _build_horizon_summary(paths: np.ndarray, current_price: float) -> list[dict
         running_peaks = np.maximum.accumulate(path_slice, axis=1)
         drawdowns = path_slice / np.maximum(running_peaks, 1e-8) - 1.0
         max_drawdown = np.min(drawdowns, axis=1)
+        terminal_returns = terminal_prices / current_price - 1.0
+        lower_tail = float(np.quantile(terminal_returns, .05))
+        upside = float(np.mean(terminal_prices > current_price))
+        count = len(terminal_prices)
+        z = 1.96
+        denominator = 1 + z ** 2 / count
+        center = (upside + z ** 2 / (2 * count)) / denominator
+        radius = z * np.sqrt(upside * (1 - upside) / count + z ** 2 / (4 * count ** 2)) / denominator
         summaries.append(
             {
                 "label": label,
@@ -699,7 +726,11 @@ def _build_horizon_summary(paths: np.ndarray, current_price: float) -> list[dict
                 "p25": float(np.percentile(terminal_prices, 25)),
                 "p75": float(np.percentile(terminal_prices, 75)),
                 "p95": float(np.percentile(terminal_prices, 95)),
-                "probability_upside": float(np.mean(terminal_prices > current_price)),
+                "probability_upside": upside,
+                "probability_upside_mc_ci95_low": max(0., float(center - radius)),
+                "probability_upside_mc_ci95_high": min(1., float(center + radius)),
+                "var_95_loss": max(0., -lower_tail),
+                "expected_shortfall_95_loss": max(0., -float(terminal_returns[terminal_returns <= lower_tail].mean())),
                 "probability_down_5pct": float(np.mean(terminal_prices < current_price * 0.95)),
                 "probability_up_5pct": float(np.mean(terminal_prices > current_price * 1.05)),
                 "median_return": float(np.percentile(terminal_prices / current_price - 1.0, 50)),
@@ -717,6 +748,7 @@ def _build_recent_calibration(
     regime_model: dict[str, Any],
     mean_model: dict[str, float],
     volatility_model: dict[str, Any],
+    drift_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     filtered = regime_model.get("filtered_probabilities", regime_model["smoothed_probabilities"])
     regime_means = np.array([item["mean_return"] for item in regime_model["stats"]], dtype=float)
@@ -738,6 +770,8 @@ def _build_recent_calibration(
     ).rename("predicted_mean")
 
     common = pd.concat([predicted_mean, sigma_series, realized_next], axis=1).dropna().tail(126)
+    if drift_selection is not None:
+        common = drift_selection['holdout_predictions'].dropna()
     if common.empty:
         return {
             "sample_days": 0,
@@ -752,7 +786,7 @@ def _build_recent_calibration(
             "summary": "Δεν βγήκαν αρκετά observations για calibration diagnostics.",
         }
 
-    residual_pool = np.asarray(volatility_model["std_resid"], dtype=float)
+    residual_pool = np.asarray(volatility_model["std_resid"], dtype=float) if drift_selection is None else np.array([])
     if len(residual_pool) < 20:
         lower_q, upper_q = -1.64, 1.64
     else:
@@ -760,10 +794,12 @@ def _build_recent_calibration(
 
     lower_band = common["predicted_mean"] + common["sigma"] * lower_q
     upper_band = common["predicted_mean"] + common["sigma"] * upper_q
+    if drift_selection is not None:
+        lower_band, upper_band = common['lower_band'], common['upper_band']
 
-    sign_accuracy = float(
-        np.mean(np.sign(common["predicted_mean"].to_numpy()) == np.sign(common["realized_next"].to_numpy()))
-    )
+    predicted_sign = np.sign(common["predicted_mean"].to_numpy())
+    realized_sign = np.sign(common["realized_next"].to_numpy())
+    sign_accuracy = float(np.mean(np.where(predicted_sign == 0, .5, predicted_sign == realized_sign)))
     interval_coverage = float(
         np.mean(
             (common["realized_next"] >= lower_band)
@@ -795,6 +831,14 @@ def _build_recent_calibration(
         if label == "Balanced"
         else "Το μοντέλο παραμένει χρήσιμο σαν probability map, αλλά το πρόσφατο calibration είναι αδύναμο."
     )
+    if drift_selection is not None:
+        label = f"One-day {label}"
+        summary = (
+            "Chronological holdout diagnostics for the selected daily drift with causal EWMA volatility "
+            "and 90% bands calibrated on earlier standardized errors. Serial dependence can impair coverage. "
+            "The score is descriptive, not a probability of forecast accuracy. "
+            "These bands do not validate the Markov/GARCH Monte Carlo distribution or multi-day horizons."
+        )
 
     return {
         "sample_days": int(len(common)),
@@ -860,13 +904,31 @@ def _build_forecast_takeaways(
 
 
 def build_forecast_report(dataset: StockDataset, config: ForecastConfig) -> dict[str, Any]:
-    close_prices = pd.to_numeric(dataset.price_history["Close"], errors="coerce").dropna()
+    close_prices = pd.to_numeric(dataset.price_history["Close"], errors="coerce").dropna().sort_index()
+    if (not np.isfinite(close_prices).all() or (close_prices <= 0).any()
+            or close_prices.index.has_duplicates):
+        raise ForecastModelError("Forecasting needs positive finite prices with unique dates.")
+    if config.simulations < 1 or config.max_horizon < 1:
+        raise ForecastModelError("Forecast simulation count and horizon must be positive.")
     if len(close_prices) < 252:
         raise ForecastModelError("Δεν υπάρχουν αρκετά ιστορικά daily prices για forecasting.")
 
     log_returns = np.log(close_prices).diff().dropna()
     if len(log_returns) < 200:
         raise ForecastModelError("Τα returns είναι πολύ λίγα για σταθερό regime/volatility model.")
+
+    market_frame = dataset.context_price_history.get("SPY")
+    market_returns = None
+    if market_frame is not None and "Close" in market_frame:
+        market_close = pd.to_numeric(market_frame["Close"], errors="coerce")
+        market_returns = np.log(market_close.where(market_close > 0)).diff()
+    checkpoint = Path(__file__).resolve().parent.parent / '.cache' / 'learning' / (
+        hashlib.sha256(dataset.symbol.upper().encode()).hexdigest() + '.json'
+    )
+    try:
+        drift_selection = fit_drift_selection(log_returns, market_returns, dataset.risk_free_rate, checkpoint)
+    except ValueError as exc:
+        raise ForecastModelError(str(exc)) from exc
 
     try:
         regime_model = _fit_markov_model(log_returns, config.markov_regimes)
@@ -878,7 +940,7 @@ def build_forecast_report(dataset: StockDataset, config: ForecastConfig) -> dict
     jump_process = _estimate_jump_process(log_returns)
     context_features = _build_context_features(dataset, log_returns)
     context_model = _fit_context_mean_model(log_returns, context_features["features"])
-    calibration = _build_recent_calibration(log_returns, regime_model, mean_model, volatility_model)
+    calibration = _build_recent_calibration(log_returns, regime_model, mean_model, volatility_model, drift_selection)
 
     overall_std = float(log_returns.std(ddof=0))
     regime_means = np.array([item["mean_return"] for item in regime_model["stats"]], dtype=float)
@@ -911,6 +973,7 @@ def build_forecast_report(dataset: StockDataset, config: ForecastConfig) -> dict
         context_model=context_model,
         context_scores=context_features["scores"],
         simulations=config.simulations,
+        drift_selection=drift_selection,
     )
 
     last_date = pd.to_datetime(close_prices.index[-1])
@@ -948,7 +1011,7 @@ def build_forecast_report(dataset: StockDataset, config: ForecastConfig) -> dict
 
     return {
         "model_name": (
-            f"{regime_model['model_name']} + AR(1) mean blend + "
+            f"{regime_model['model_name']} risk + {drift_selection['selected_model']} drift + "
             "GARCH/GJR-t volatility ensemble + bootstrap/jump Monte Carlo"
         ),
         "current_regime": regime_model["labels"][current_regime_index],
@@ -963,6 +1026,7 @@ def build_forecast_report(dataset: StockDataset, config: ForecastConfig) -> dict
         "volatility_models": volatility_models,
         "selected_volatility_model": volatility_model["selected_model"],
         "mean_model": mean_model,
+        "drift_selection": drift_selection,
         "jump_process": jump_process,
         "context_scores": context_features["scores"],
         "context_assets_used": context_features["used_assets"],
